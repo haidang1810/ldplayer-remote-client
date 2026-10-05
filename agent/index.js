@@ -4,7 +4,7 @@
 import { hostname } from 'node:os';
 import { parseArgs } from 'node:util';
 import WebSocket from 'ws';
-import { STREAM_CLI_OPTIONS, createDeviceEnv } from '../server/devices.js';
+import { STREAM_CLI_OPTIONS, createDeviceEnv } from '../src/devices.js';
 
 const { values: opts } = parseArgs({
   options: {

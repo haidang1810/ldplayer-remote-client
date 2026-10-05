@@ -7,8 +7,8 @@
   "scripts": {
     "postinstall": "node scripts/fetch-server.js",
     "fetch-server": "node scripts/fetch-server.js",
-    "start": "node server/index.js",
-    "encoders": "node server/index.js --list-encoders",
+    "start": "node src/local.js",
+    "encoders": "node src/local.js --list-encoders",
     "agent": "node --env-file-if-exists=agent.env agent/index.js"
   },
   "engines": {

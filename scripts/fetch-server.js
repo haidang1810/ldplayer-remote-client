@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { SCRCPY_VERSION, SCRCPY_SERVER_SHA256 } from '../server/scrcpy-version.js';
+import { SCRCPY_VERSION, SCRCPY_SERVER_SHA256 } from '../src/scrcpy-version.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const target = join(root, 'vendor', `scrcpy-server-v${SCRCPY_VERSION}`);

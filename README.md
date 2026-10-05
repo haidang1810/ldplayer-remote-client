@@ -72,5 +72,5 @@ nghĩa là đang đi vòng qua VPS; `rtt` cao bất thường thì đường tru
 ## Cấu trúc
 
 - `agent/`: kết nối ra server; với mỗi người xem thì mở thêm một channel
-- `server/`: giao thức scrcpy, gom luồng cho nhiều người xem (`hub.js`), adb/ldconsole, đăng nhập, chế độ local
-- `public/`: web client (WebCodecs + canvas). Bản sao giống hệt trong repo server
+- `src/`: lõi chạy trên PC: giao thức scrcpy, gom luồng cho nhiều người xem (`hub.js`), WebRTC (`rtc.js`), adb/ldconsole, đăng nhập; `src/local.js` là chế độ local (`npm start`)
+- `public/`: web client (WebRTC `<video>`, dự phòng WebCodecs + canvas). Bản sao giống hệt trong repo server
