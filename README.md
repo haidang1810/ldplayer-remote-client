@@ -55,6 +55,20 @@ Từ máy khác trong LAN thì chạy `npm start -- --https`, vì WebCodecs ch�
 | `MAX_FPS` / `--max-fps` | `60` | |
 | `VIDEO_ENCODER` / `--encoder` | tự chọn | xem danh sách: `npm run encoders` |
 
+## Log chẩn đoán
+
+Trình duyệt tự gửi về agent các sự kiện sau, ghi vào console / `agent.log` kèm giờ:
+
+- `viewer freeze: ms=… keyframes=… transport=rtc path=P2P|TURN fps=… lossPct=… rtt=… buffer=…`: hình đứng
+  quá 500 ms (trình duyệt đã tự xin keyframe).
+- `viewer rtc-fallback: reason=…`: WebRTC hỏng, chuyển sang WebSocket.
+- `viewer ws-stall`: kết nối im lặng quá 4 s, trình duyệt kết nối lại.
+- `viewer summary: freezes=… freezeMs=… …`: tóm tắt mỗi phút.
+- `key frame reset (lý do)`: agent reset encoder để có keyframe mới.
+
+Gợi ý đọc log: `lossPct` cao thì mạng mất gói (thử giảm `BIT_RATE` hoặc bật `PACING_FACTOR=4`); `path=TURN`
+nghĩa là đang đi vòng qua VPS; `rtt` cao bất thường thì đường truyền bị nghẽn.
+
 ## Cấu trúc
 
 - `agent/`: kết nối ra server; với mỗi người xem thì mở thêm một channel

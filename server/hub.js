@@ -27,6 +27,10 @@ const MAX_INFLIGHT_FRAMES = 240;
 const RTT_SAMPLES = 120;
 // Give WebRTC this long to connect before the viewer stays on the WebSocket path.
 const RTC_CONNECT_TIMEOUT_MS = 15000;
+// Diagnostic events from browsers (see public/app.js) end up in the agent log.
+const DIAG_MAX_PER_MINUTE = 30;
+const DIAG_NUMBERS = ['ms', 'keyframes', 'fps', 'mbps', 'lost', 'lossPct', 'rtt', 'buffer', 'freezes', 'freezeMs'];
+const DIAG_STRINGS = ['transport', 'path', 'reason'];
 
 export const DEFAULT_ICE = {
   agent: ['stun:stun.l.google.com:19302'],
@@ -58,6 +62,8 @@ class Viewer {
     this.rtcSending = false;
     this.rtcNeedKey = true;
     this.rtcTimer = null;
+    this.diagWindowStart = 0;
+    this.diagCount = 0;
     this.inflight = []; // { seq, sentAt } in send order
     this.rttSamples = [];
     this.baseRtt = null;
@@ -125,7 +131,7 @@ class DeviceStream {
     this.viewers.add(viewer);
     if (this.state === 'running') {
       this.sendHello(viewer);
-      this.requestKeyframe();
+      this.requestKeyframe('viewer joined');
     } else {
       viewer.sendJson({ type: 'status', state: 'starting' });
       if (this.state === 'idle') this.start();
@@ -207,11 +213,31 @@ class DeviceStream {
     this.hub.streams.delete(this.serial);
   }
 
-  requestKeyframe() {
+  requestKeyframe(reason) {
     const t = Date.now();
     if (!this.session || this.state !== 'running' || t - this.lastKeyframeRequest < KEYFRAME_REQUEST_COOLDOWN_MS) return;
     this.lastKeyframeRequest = t;
+    this.log(`key frame reset (${reason})`);
     this.session.sendControl(Buffer.from([ControlType.RESET_VIDEO]));
+  }
+
+  /** Logs a browser diagnostic event. Fields come from the client, so only whitelisted ones pass. */
+  logDiag(viewer, msg) {
+    const t = Date.now();
+    if (t - viewer.diagWindowStart > 60000) {
+      viewer.diagWindowStart = t;
+      viewer.diagCount = 0;
+    }
+    if (++viewer.diagCount > DIAG_MAX_PER_MINUTE) return;
+    const parts = [];
+    for (const key of DIAG_NUMBERS) {
+      if (typeof msg[key] === 'number' && Number.isFinite(msg[key])) parts.push(`${key}=${Math.round(msg[key] * 10) / 10}`);
+    }
+    for (const key of DIAG_STRINGS) {
+      if (typeof msg[key] === 'string') parts.push(`${key}=${msg[key].replace(/[^\p{L}\p{N} .:()-]/gu, '').slice(0, 80)}`);
+    }
+    const event = typeof msg.event === 'string' ? msg.event.replace(/[^\w-]/g, '').slice(0, 24) : '?';
+    this.log(`viewer ${event}: ${parts.join(' ')}`);
   }
 
   onPacket({ config, key, pts, data }) {
@@ -248,14 +274,14 @@ class DeviceStream {
       if (key) v.needKey = false;
       v.sendFrame(seq, msg);
     }
-    if (waiting && Date.now() - this.lastKeyframeAt > KEYFRAME_STALE_MS) this.requestKeyframe();
+    if (waiting && Date.now() - this.lastKeyframeAt > KEYFRAME_STALE_MS) this.requestKeyframe('stale key frame');
   }
 
   startRtc(viewer) {
     if (!rtcAvailable() || viewer.rtc) return;
     let rtc;
     try {
-      rtc = new RtcPeer({ iceServers: viewer.ice.agent, signal: (m) => viewer.sendJson(m) });
+      rtc = new RtcPeer({ iceServers: viewer.ice.agent, signal: (m) => viewer.sendJson(m), bitRate: this.hub.video.bitRate });
     } catch (err) {
       this.log('rtc start failed:', err.message);
       viewer.sendJson({ type: 'rtc-failed', message: err.message });
@@ -269,11 +295,11 @@ class DeviceStream {
     rtc.on('video-open', () => {
       viewer.rtcSending = true;
       viewer.rtcNeedKey = true;
-      this.requestKeyframe();
+      this.requestKeyframe('webrtc opened');
     });
     rtc.on('keyframe-request', () => {
       viewer.rtcNeedKey = true;
-      this.requestKeyframe();
+      this.requestKeyframe('webrtc PLI');
     });
     rtc.on('message', (m) => this.handleMessage(viewer, m, typeof m !== 'string'));
     rtc.on('failed', (state) => this.failRtc(viewer, state));
@@ -286,7 +312,7 @@ class DeviceStream {
     this.stopRtc(viewer);
     viewer.sendJson({ type: 'rtc-failed', message: reason });
     viewer.needKey = true;
-    this.requestKeyframe();
+    this.requestKeyframe('webrtc fallback');
   }
 
   stopRtc(viewer) {
@@ -326,7 +352,7 @@ class DeviceStream {
       case 'keyframe':
         viewer.needKey = true;
         viewer.rtcNeedKey = true;
-        this.requestKeyframe();
+        this.requestKeyframe('viewer request');
         break;
       case 'rtc-ready':
         // The browser is rendering RTP video: stop the WebSocket copy.
@@ -337,13 +363,16 @@ class DeviceStream {
           this.log('viewer switched to webrtc');
         }
         break;
+      case 'diag':
+        this.logDiag(viewer, msg);
+        break;
       case 'pause':
         viewer.paused = true;
         break;
       case 'resume':
         viewer.paused = false;
         viewer.needKey = true;
-        this.requestKeyframe();
+        this.requestKeyframe('tab visible');
         break;
       case 'rtc-start':
         this.startRtc(viewer);

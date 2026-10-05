@@ -17,6 +17,12 @@ const PAYLOAD_TYPE = 96;
 const CLOCK_RATE = 90000;
 const MAX_FRAGMENT_SIZE = 1200; // stays under typical path MTU (incl. TURN/VPN overhead)
 const NACK_HISTORY = 1024; // RTP packets kept for retransmission (~a keyframe and change)
+// Off by default: measured locally it added ~35-40 ms of receiver jitter buffer (Chrome sizes the
+// buffer for the slowest, i.e. paced key frames). Try PACING_FACTOR=4 if diagnostics show freezes
+// from bursty packet loss on a weak link.
+const PACING_FACTOR = Number(process.env.PACING_FACTOR ?? 0);
+const PACING_MIN_BPS = 20e6;
+const PACING_INTERVAL_MS = 5;
 
 /** Pulls PLI / FIR (keyframe requests) out of an RTCP compound packet. */
 function hasKeyframeRequest(buf) {
@@ -39,8 +45,9 @@ export class RtcPeer extends EventEmitter {
    * @param {object} o
    * @param {Array} o.iceServers node-datachannel format
    * @param {(msg: object) => void} o.signal sends a signaling message to the browser
+   * @param {number} o.bitRate encoder bit rate, used to size the send pacing
    */
-  constructor({ iceServers, signal }) {
+  constructor({ iceServers, signal, bitRate }) {
     super();
     this.signal = signal;
     this.closed = false;
@@ -69,6 +76,14 @@ export class RtcPeer extends EventEmitter {
     const packetizer = new ndc.H264RtpPacketizer('StartSequence', this.rtpConfig, MAX_FRAGMENT_SIZE);
     packetizer.addToChain(new ndc.RtcpSrReporter(this.rtpConfig));
     packetizer.addToChain(new ndc.RtcpNackResponder(NACK_HISTORY));
+    // A key frame is ~100 packets produced at once; sent back-to-back they overflow router and
+    // radio queues (typical on 4G) and get dropped together, freezing the picture. Spread them
+    // at a few times the stream bit rate: key frames go out over tens of ms, regular frames are
+    // barely delayed.
+    if (PACING_FACTOR > 0) {
+      const pacingBps = Math.max(PACING_MIN_BPS, (bitRate || 8e6) * PACING_FACTOR);
+      packetizer.addToChain(new ndc.PacingHandler(pacingBps, PACING_INTERVAL_MS));
+    }
     this.track.setMediaHandler(packetizer);
     this.track.onOpen(() => this.emit('video-open'));
     this.track.onMessage((buf) => {
