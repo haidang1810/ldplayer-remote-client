@@ -1,10 +1,14 @@
 // One DeviceStream per adb serial: a single scrcpy session fanned out to every connected viewer.
 import { performance } from 'node:perf_hooks';
 import { ScrcpySession, ControlType, isValidControlMessage } from './scrcpy.js';
+import { TouchPacer } from './touch-pacer.js';
 
 export const now = () => performance.timeOrigin + performance.now();
 
 const MSG_VIDEO = 1;
+// Viewer → agent: [0xF0][f64 capture time ms][32-byte scrcpy touch message], see touch-pacer.js.
+const MSG_TIMED_TOUCH = 0xf0;
+const TIMED_TOUCH_SIZE = 41;
 const VIDEO_HEADER_SIZE = 22;
 const IDLE_STOP_MS = 10000;
 const KEYFRAME_REQUEST_COOLDOWN_MS = 500;
@@ -104,6 +108,7 @@ class DeviceStream {
   }
 
   removeViewer(viewer) {
+    viewer.pacer.releaseAll();
     this.viewers.delete(viewer);
     if (this.viewers.size === 0 && !this.stopTimer) {
       this.stopTimer = setTimeout(() => this.stop(), IDLE_STOP_MS);
@@ -207,7 +212,15 @@ class DeviceStream {
 
   handleMessage(viewer, data, isBinary) {
     if (isBinary) {
-      if (this.state === 'running' && isValidControlMessage(data)) this.session.sendControl(data);
+      if (this.state !== 'running') return;
+      if (data[0] === MSG_TIMED_TOUCH) {
+        const touch = data.subarray(9);
+        if (data.length === TIMED_TOUCH_SIZE && touch[0] === ControlType.INJECT_TOUCH_EVENT) {
+          viewer.pacer.push(data.readDoubleBE(1), touch);
+        }
+      } else if (isValidControlMessage(data)) {
+        this.session.sendControl(data);
+      }
       return;
     }
     let msg;
@@ -244,6 +257,7 @@ export class Hub {
       this.streams.set(serial, stream);
     }
     const viewer = new Viewer(ws);
+    viewer.pacer = new TouchPacer((msg) => stream.session?.sendControl(msg));
     ws.on('message', (data, isBinary) => stream.handleMessage(viewer, data, isBinary));
     ws.on('close', () => stream.removeViewer(viewer));
     ws.on('error', (err) => stream.log('websocket error:', err.message));

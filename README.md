@@ -48,7 +48,7 @@ Từ máy khác trong LAN thì chạy `npm start -- --https`, vì WebCodecs ch�
 | Biến môi trường / cờ | Mặc định | Ghi chú |
 |---|---|---|
 | `BIT_RATE` / `--bit-rate` | `8M` | 4G nên `3M`–`4M` |
-| `MAX_SIZE` / `--max-size` | `0` (gốc) | cạnh dài tối đa, ví dụ `1280` |
+| `MAX_SIZE` / `--max-size` | `1280` | cạnh dài tối đa; `0` = gốc (nét hơn nhưng encoder phần mềm của LDPlayer chỉ ~42 fps, so với ~53 fps ở 1280) |
 | `MAX_FPS` / `--max-fps` | `60` | |
 | `VIDEO_ENCODER` / `--encoder` | tự chọn | xem danh sách: `npm run encoders` |
 

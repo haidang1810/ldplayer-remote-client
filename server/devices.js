@@ -14,7 +14,7 @@ export const SERVER_PATH = join(ROOT, 'vendor', `scrcpy-server-v${SCRCPY_VERSION
 export const STREAM_CLI_OPTIONS = {
   'ldplayer-dir': { type: 'string', default: process.env.LDPLAYER_DIR },
   adb: { type: 'string', default: process.env.ADB_PATH },
-  'max-size': { type: 'string', default: process.env.MAX_SIZE ?? '0' },
+  'max-size': { type: 'string', default: process.env.MAX_SIZE ?? '1280' },
   'bit-rate': { type: 'string', default: process.env.BIT_RATE ?? '8M' },
   'max-fps': { type: 'string', default: process.env.MAX_FPS ?? '60' },
   encoder: { type: 'string', default: process.env.VIDEO_ENCODER },
