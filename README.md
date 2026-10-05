@@ -12,10 +12,13 @@ Phần chạy trên **PC có LDPlayer**: lấy hình từ bên trong Android b�
 [Trình duyệt]──https──▶[VPS: server]◀──wss (PC tự kết nối ra)──[PC: agent]──adb──▶[LDPlayer]
 ```
 
+- **WebRTC**: video H.264 đóng gói thẳng vào RTP (không encode lại), đi P2P giữa PC và trình duyệt;
+  không nối thẳng được thì đi qua TURN trên VPS. Điều khiển đi qua DataChannel. Nếu WebRTC không
+  kết nối được, tự quay về WebSocket (thêm `?rtc=0` vào URL để ép dùng WebSocket).
 - Hình lấy từ bên trong Android nên tắt màn hình PC, thu nhỏ hay che LDPlayer vẫn chạy.
 - Điều khiển: multi-touch, chuột (chuột phải = Back, chuột giữa = Home), cuộn, bàn phím. Chữ có
   dấu (tiếng Việt) được dán qua clipboard. Nút "Phím game" gửi mã phím thô.
-- Chống trễ dồn: trình duyệt báo nhận từng frame. Nếu hàng đợi trên đường truyền vượt RTT + 250 ms
+- Chống trễ dồn (chế độ WebSocket): trình duyệt báo nhận từng frame. Nếu hàng đợi trên đường truyền vượt RTT + 250 ms
   thì agent bỏ frame và gửi keyframe mới.
 
 ## Chuẩn bị

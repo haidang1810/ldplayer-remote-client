@@ -18,7 +18,8 @@ export const STREAM_CLI_OPTIONS = {
   'bit-rate': { type: 'string', default: process.env.BIT_RATE ?? '8M' },
   'max-fps': { type: 'string', default: process.env.MAX_FPS ?? '60' },
   encoder: { type: 'string', default: process.env.VIDEO_ENCODER },
-  'codec-options': { type: 'string', default: process.env.CODEC_OPTIONS },
+  // A key frame every 3 s lets a viewer that dropped frames recover without resetting the encoder.
+  'codec-options': { type: 'string', default: process.env.CODEC_OPTIONS ?? 'i-frame-interval:int=3' },
   'max-buffered-kb': { type: 'string', default: process.env.MAX_BUFFERED_KB ?? '256' },
 };
 

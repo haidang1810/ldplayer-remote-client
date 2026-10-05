@@ -55,10 +55,10 @@ function watchSilence(ws) {
   ws.on('close', () => clearTimeout(timer));
 }
 
-function openChannel(id, serial) {
+function openChannel(id, serial, ice) {
   const channel = new WebSocket(`${relayUrl}/agent/channel?id=${encodeURIComponent(id)}`, wsOptions);
   watchSilence(channel);
-  channel.on('open', () => env.hub.attach(serial, channel));
+  channel.on('open', () => env.hub.attach(serial, channel, ice ? { ice } : {}));
   channel.on('error', (err) => warn(`channel ${id.slice(0, 8)}: ${err.message}`));
 }
 
@@ -93,7 +93,8 @@ function connect() {
       const devices = await env.listDevices().catch(() => []);
       ws.send(JSON.stringify({ type: 'devices', reqId: msg.reqId, devices }));
     } else if (msg.type === 'open' && typeof msg.channel === 'string' && typeof msg.serial === 'string') {
-      openChannel(msg.channel, msg.serial);
+      const ice = msg.ice && Array.isArray(msg.ice.agent) && Array.isArray(msg.ice.browser) ? msg.ice : null;
+      openChannel(msg.channel, msg.serial, ice);
     }
   });
 }
