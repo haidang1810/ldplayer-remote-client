@@ -1,0 +1,21 @@
+{
+  "name": "ldplayer-remote-client",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Remote control an LDPlayer (Android) instance from a web browser via scrcpy-server + WebCodecs",
+  "type": "module",
+  "scripts": {
+    "postinstall": "node scripts/fetch-server.js",
+    "fetch-server": "node scripts/fetch-server.js",
+    "start": "node server/index.js",
+    "encoders": "node server/index.js --list-encoders",
+    "agent": "node --env-file-if-exists=agent.env agent/index.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "selfsigned": "^5.5.0",
+    "ws": "^8.22.0"
+  }
+}
