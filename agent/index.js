@@ -31,38 +31,52 @@ console.log(`adb          : ${env.adbPath}`);
 console.log(`stream       : ${JSON.stringify(env.hub.video)}`);
 console.log(`relay        : ${relayUrl} as "${name}"`);
 
-// The relay pings every 15 s; silence for longer means the connection is dead (sleep, NAT reset).
-const RELAY_SILENCE_MS = 40000;
+// The relay pings every 5 s; this much silence means the connection is dead (network blip, NAT
+// reset) even if TCP has not noticed yet, so drop it and reconnect instead of hanging.
+const RELAY_SILENCE_MS = 12000;
 let backoff = 1000;
+
+const stamp = () => new Date().toLocaleTimeString('vi-VN', { hour12: false });
+const log = (...args) => console.log(stamp(), ...args);
+const warn = (...args) => console.warn(stamp(), ...args);
+
+/** Terminates the socket when the relay stops pinging it. */
+function watchSilence(ws) {
+  let timer = null;
+  const alive = () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => ws.terminate(), RELAY_SILENCE_MS);
+  };
+  ws.on('open', () => {
+    ws._socket.setKeepAlive(true, 5000);
+    alive();
+  });
+  ws.on('ping', alive);
+  ws.on('close', () => clearTimeout(timer));
+}
 
 function openChannel(id, serial) {
   const channel = new WebSocket(`${relayUrl}/agent/channel?id=${encodeURIComponent(id)}`, wsOptions);
+  watchSilence(channel);
   channel.on('open', () => env.hub.attach(serial, channel));
-  channel.on('error', (err) => console.warn(`channel ${id.slice(0, 8)}: ${err.message}`));
+  channel.on('error', (err) => warn(`channel ${id.slice(0, 8)}: ${err.message}`));
 }
 
 function connect() {
   const ws = new WebSocket(`${relayUrl}/agent`, wsOptions);
-  let silenceTimer = null;
-  const alive = () => {
-    clearTimeout(silenceTimer);
-    silenceTimer = setTimeout(() => ws.terminate(), RELAY_SILENCE_MS);
-  };
+  watchSilence(ws);
 
   ws.on('open', () => {
-    console.log('connected to relay');
+    log('connected to relay');
     backoff = 1000;
-    alive();
   });
-  ws.on('ping', alive);
   ws.on('unexpected-response', (_req, res) => {
-    console.error(`relay refused the connection: HTTP ${res.statusCode}${res.statusCode === 401 ? ' (wrong AGENT_KEY?)' : ''}`);
+    warn(`relay refused the connection: HTTP ${res.statusCode}${res.statusCode === 401 ? ' (wrong AGENT_KEY?)' : ''}`);
     ws.terminate();
   });
-  ws.on('error', (err) => console.warn(`relay connection error: ${err.message}`));
-  ws.on('close', () => {
-    clearTimeout(silenceTimer);
-    console.log(`disconnected from relay, retrying in ${backoff / 1000}s`);
+  ws.on('error', (err) => warn(`relay connection error: ${err.message}`));
+  ws.on('close', (code, reason) => {
+    log(`disconnected from relay (code ${code}${reason.length ? `, ${reason}` : ''}), retrying in ${backoff / 1000}s`);
     setTimeout(connect, backoff);
     backoff = Math.min(backoff * 2, 30000);
   });

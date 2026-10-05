@@ -91,7 +91,7 @@ class DeviceStream {
   }
 
   log(...args) {
-    console.log(`[${this.serial}]`, ...args);
+    console.log(new Date().toLocaleTimeString('vi-VN', { hour12: false }), `[${this.serial}]`, ...args);
   }
 
   addViewer(viewer) {
