@@ -31,7 +31,7 @@ Phần chạy trên **PC có LDPlayer**: lấy hình từ bên trong Android b�
 
 1. Chép `agent.env.example` thành `agent.env`, điền:
    - `RELAY_URL=wss://tên-miền-của-bạn`
-   - `AGENT_KEY=` khoá in ra khi chạy `npm run setup` trên server
+   - `AGENT_KEY=` API key tạo trên web: đăng nhập → biểu tượng người (Tài khoản) → Tạo key. Một key dùng được cho nhiều PC.
 2. Chạy thử: `npm run agent`. Thấy `connected to relay` là xong.
 3. Cho agent tự chạy mỗi khi đăng nhập Windows:
    `powershell -ExecutionPolicy Bypass -File scripts\install-agent-task.ps1` (log ghi ra `agent.log`)

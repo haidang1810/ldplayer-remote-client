@@ -1,7 +1,11 @@
 // Agent mode (runs on the LDPlayer PC): keeps an outbound connection to the relay, so the PC is
 // reachable from anywhere without opening ports. For each viewer the relay asks us to dial back a
 // channel socket, which is attached to the hub exactly like a local browser socket.
+import { randomUUID } from 'node:crypto';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { hostname } from 'node:os';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import WebSocket from 'ws';
 import { STREAM_CLI_OPTIONS, createDeviceEnv } from '../src/devices.js';
@@ -21,8 +25,21 @@ if (!opts.relay || !opts.key) {
 }
 
 const relayUrl = opts.relay.replace(/^http/, 'ws').replace(/\/+$/, '');
-const name = opts.name.replace(/[^\w.-]/g, '').slice(0, 40);
-const headers = { Authorization: `Bearer ${opts.key}`, 'X-Agent-Name': name };
+const name = opts.name.trim().slice(0, 40);
+
+/** Stable id for this PC, so several PCs can share one API key and still show up separately. */
+function machineId() {
+  const file = join(dirname(fileURLToPath(import.meta.url)), '..', '.machine-id');
+  if (existsSync(file)) {
+    const id = readFileSync(file, 'utf8').trim();
+    if (id) return id;
+  }
+  const id = randomUUID();
+  writeFileSync(file, id);
+  return id;
+}
+
+const headers = { Authorization: `Bearer ${opts.key}`, 'X-Agent-Name': encodeURIComponent(name), 'X-Machine-Id': machineId() };
 const wsOptions = { headers, perMessageDeflate: false, handshakeTimeout: 10000 };
 
 const env = await createDeviceEnv(opts);
@@ -71,7 +88,7 @@ function connect() {
     backoff = 1000;
   });
   ws.on('unexpected-response', (_req, res) => {
-    warn(`relay refused the connection: HTTP ${res.statusCode}${res.statusCode === 401 ? ' (wrong AGENT_KEY?)' : ''}`);
+    warn(`relay refused the connection: HTTP ${res.statusCode}${res.statusCode === 401 ? ' (wrong or revoked API key?)' : ''}`);
     ws.terminate();
   });
   ws.on('error', (err) => warn(`relay connection error: ${err.message}`));
