@@ -6,6 +6,7 @@ mod config;
 mod gpu;
 mod hub;
 mod ldplayer;
+mod manage;
 mod pacer;
 mod relay;
 mod rtc;
@@ -231,6 +232,10 @@ fn init_logging() -> Option<tracing_appender::non_blocking::WorkerGuard> {
 }
 
 fn single_instance() -> bool {
+    // A separate config folder (LDR_CONFIG_DIR, used for testing) is a separate agent.
+    if std::env::var_os("LDR_CONFIG_DIR").is_some() {
+        return true;
+    }
     #[cfg(windows)]
     unsafe {
         use windows_sys::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};

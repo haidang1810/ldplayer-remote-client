@@ -12,6 +12,12 @@ Một key dùng được cho nhiều PC: mỗi PC tự tạo mã máy riêng nê
 
 Mở lại `ldremote.exe` khi agent đang chạy, hoặc bấm vào biểu tượng ở khay, đều mở trang cài đặt. Khi tự chạy cùng Windows (`--autostart`) thì agent không mở trình duyệt, trừ khi chưa có API key. *Xem log* mở file log hôm nay bằng Notepad.
 
+## Quản lý từ web
+
+Trang web gửi lệnh qua relay, agent chạy bằng `ldconsole.exe` / `adb.exe` của LDPlayer: tạo máy mới hoặc nhân bản, bật / tắt / khởi động lại, đổi tên, xoá, chụp màn hình, cài APK, mở / dừng / gỡ ứng dụng. Agent tự bật *ADB debugging* cho máy mới tạo và cho máy được bật từ web (máy LDPlayer mới mặc định tắt ADB, khi đó web không xem được). Nhân bản máy lớn có thể mất vài phút: web nhận "đang xử lý" và máy mới hiện ra khi xong.
+
+Chạy thêm một agent để thử (cùng lúc với agent chính) bằng thư mục cấu hình riêng: `LDR_CONFIG_DIR=<thư mục> ldremote.exe`.
+
 ## Nguồn hình
 
 | | **Tự động (GPU)**, mặc định | **scrcpy** |
@@ -51,6 +57,7 @@ File ra ở `target/release/ldremote.exe`.
 | `gpu.rs` | chế độ GPU: WGC → cắt + đổi NV12 bằng D3D11 video processor → H.264 phần cứng (Media Foundation), bitrate và keyframe điều khiển được |
 | `scrcpy.rs` | client scrcpy 4.1 (push jar, adb forward, đọc luồng video/điều khiển; hoặc chỉ điều khiển) |
 | `pacer.rs` | phát lại thao tác chạm đúng nhịp thời gian gốc |
+| `manage.rs` | lệnh từ web: tạo / nhân bản / bật / tắt / đổi tên / xoá máy (`ldconsole`), ảnh chụp màn hình (`screencap` thô → JPEG nhỏ), danh sách / mở / dừng / gỡ ứng dụng, cài APK (tải từ relay qua `/agent/file`, bật máy nếu đang tắt, `adb install -r`) |
 | `ldplayer.rs` | tìm LDPlayer, `ldconsole list2`, `adb devices` |
 | `settings.rs` | trang cài đặt trên 127.0.0.1 |
 | `main.rs` | khay hệ thống, chạy cùng Windows, một instance duy nhất |

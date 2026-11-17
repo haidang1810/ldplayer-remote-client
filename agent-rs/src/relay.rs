@@ -28,7 +28,7 @@ fn request(cfg: &Config, path: &str) -> Result<tokio_tungstenite::tungstenite::h
     Ok(req)
 }
 
-async fn connect(cfg: &Config, path: &str) -> Result<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>, WsError> {
+pub(crate) async fn connect(cfg: &Config, path: &str) -> Result<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>, WsError> {
     let req = request(cfg, path).map_err(|e| WsError::Io(std::io::Error::other(e.to_string())))?;
     let (ws, _) = tokio::time::timeout(Duration::from_secs(10), tokio_tungstenite::connect_async(req))
         .await
@@ -144,6 +144,7 @@ async fn session(cfg: &Config, shared: &Arc<Shared>, hub: &Arc<Hub>) -> Result<(
                     }
                 });
             }
+            Some("cmd") => crate::manage::handle(msg, cfg.clone(), hub.clone(), out_tx.clone()),
             _ => {}
         }
     };
