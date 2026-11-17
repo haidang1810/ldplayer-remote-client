@@ -132,9 +132,12 @@ async fn run(stun: Vec<String>, max_bps: u64, mut rx: mpsc::UnboundedReceiver<Rt
     let mut rtc = RtcConfig::new()
         .clear_codecs()
         .enable_h264(true)
-        .enable_bwe(Some(Bitrate::bps(max_bps.min(4_000_000))))
+        // Start high (quality first) instead of ramping up from a few hundred kbit/s.
+        .enable_bwe(Some(Bitrate::bps(max_bps.min(12_000_000))))
         .build(Instant::now());
-    rtc.bwe().set_bitrate(Bitrate::kbps(300), Bitrate::bps(max_bps));
+    // Keep at least 8 Mbit/s flowing (padding on a still screen) so the estimate does not sag and
+    // the first moves after a pause are not blurry while it climbs back.
+    rtc.bwe().set_bitrate(Bitrate::bps(max_bps.min(8_000_000)), Bitrate::bps(max_bps));
     rtc.add_local_candidate(Candidate::host(local, "udp")?);
     let mut public_addr = None;
     for server in &stun {

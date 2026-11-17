@@ -41,9 +41,9 @@ const DIAG_MAX_PER_MINUTE: u32 = 30;
 const GPU_KEYFRAME_COOLDOWN: Duration = Duration::from_millis(300);
 /// Adaptive bit rate bounds for the GPU encoder.
 const GPU_MIN_BITRATE: u32 = 800_000;
-const GPU_START_BITRATE: u32 = 6_000_000;
+const GPU_START_BITRATE: u32 = 12_000_000;
 /// WebSocket viewers go through the relay over TCP: keep them modest.
-const GPU_WS_MAX_BITRATE: u32 = 8_000_000;
+const GPU_WS_MAX_BITRATE: u32 = 12_000_000;
 /// Give WebRTC this long to connect before the viewer stays on the WebSocket path.
 const RTC_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const DIAG_NUMBERS: [&str; 10] = ["ms", "keyframes", "fps", "mbps", "lost", "lossPct", "rtt", "buffer", "freezes", "freezeMs"];
@@ -312,7 +312,7 @@ impl Stream {
             let result = Session::start(&adb, &serial, &hub.jar, video, etx).await.map(|(session, name)| {
                 let gpu = gpu_target.map(|((top, render), display)| {
                     let (gtx, mut grx) = mpsc::unbounded_channel::<GpuEvent>();
-                    let opts = gpu::GpuOpts { top, render, bit_rate: start_bitrate, max_fps: hub.video.max_fps, max_size: 0 };
+                    let opts = gpu::GpuOpts { top, render, bit_rate: start_bitrate, max_fps: hub.video.max_fps, max_size: 0, display };
                     let src = gpu::start(opts, gtx);
                     let itx = itx.clone();
                     tokio::spawn(async move {
@@ -640,7 +640,7 @@ impl Stream {
         for v in self.viewers.values().filter(|v| v.rtc_sending) {
             if let Some(bwe) = v.bwe {
                 // Leave room for retransmissions and key frames.
-                target = target.min((bwe as f64 * 0.85) as u32);
+                target = target.min((bwe as f64 * 0.9) as u32);
             }
         }
         let target = target.clamp(GPU_MIN_BITRATE, max);

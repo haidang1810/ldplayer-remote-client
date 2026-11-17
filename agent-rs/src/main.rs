@@ -284,12 +284,13 @@ fn open_latest_log() {
     }
 }
 
-/// `ldremote --gpu-test <top hwnd> <render hwnd> <seconds> <out.h264>`: runs the GPU pipeline alone.
+/// `ldremote --gpu-test <top hwnd> <render hwnd> <seconds> <out.h264> [WxH]`: runs the GPU pipeline alone.
 fn gpu_test() {
     let a: Vec<String> = std::env::args().collect();
     let (top, render, secs, out) = (a[2].parse().unwrap(), a[3].parse().unwrap(), a[4].parse::<u64>().unwrap(), a[5].clone());
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let src = gpu::start(gpu::GpuOpts { top, render, bit_rate: 8_000_000, max_fps: 60, max_size: 0 }, tx);
+    let display = a.get(6).and_then(|s| s.split_once('x')).and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?))).unwrap_or((0, 0));
+    let src = gpu::start(gpu::GpuOpts { top, render, bit_rate: 12_000_000, max_fps: 60, max_size: 0, display }, tx);
     let start = Instant::now();
     let mut file = Vec::new();
     let (mut frames, mut keys, mut bytes) = (0u64, 0u64, 0usize);

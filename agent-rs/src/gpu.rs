@@ -48,6 +48,8 @@ pub struct GpuOpts {
     pub max_fps: u32,
     /// Longest output side; larger windows are scaled down (0 = native).
     pub max_size: u32,
+    /// Android display size (`wm size`): the window is enlarged so the render area reaches it.
+    pub display: (u32, u32),
 }
 
 pub struct GpuSource {
@@ -78,15 +80,32 @@ pub fn start(opts: GpuOpts, events: mpsc::UnboundedSender<GpuEvent>) -> GpuSourc
     let thread = std::thread::Builder::new()
         .name("gpu-capture".into())
         .spawn(move || {
-            let restored = prepare_window(HWND(opts.top as *mut _));
+            let top = HWND(opts.top as *mut _);
+            let render = HWND(opts.render as *mut _);
+            let restored = prepare_window(top);
+            // A small window means a small, blurry stream: grow it to the Android resolution.
+            let mut original = enlarge_window(top, render, opts.display);
             // Restart the pipeline when the render area changes size (rotation, window resize).
             let result = loop {
                 match run(&opts, &events, &ctl_rx, &stop2) {
-                    Ok(Exit::Resized) => continue,
+                    Ok(Exit::Resized) => {
+                        if let Some(o) = enlarge_window(top, render, opts.display) {
+                            original.get_or_insert(o);
+                        }
+                        continue;
+                    }
                     Ok(Exit::Stopped) => break None,
                     Err(e) => break Some(format!("{e:#}")),
                 }
             };
+            if let Some((rect, portrait)) = original {
+                // Put the window back as the user had it (unless Android rotated meanwhile).
+                if render_size(render).is_some_and(|(w, h)| (h > w) == portrait) {
+                    unsafe {
+                        let _ = SetWindowPos(top, Some(HWND_BOTTOM), rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top, SWP_NOACTIVATE);
+                    }
+                }
+            }
             if restored {
                 unsafe {
                     let _ = ShowWindow(HWND(opts.top as *mut _), SW_SHOWMINNOACTIVE);
@@ -116,6 +135,52 @@ fn prepare_window(top: HWND) -> bool {
             std::thread::sleep(Duration::from_millis(300));
         }
         restored
+    }
+}
+
+fn render_size(render: HWND) -> Option<(i32, i32)> {
+    let mut r = RECT::default();
+    unsafe { GetWindowRect(render, &mut r).ok()? };
+    Some((r.right - r.left, r.bottom - r.top))
+}
+
+/// LDPlayer draws Android at the window's size, so a small window streams few pixels. Grow the
+/// window until the render area matches the Android display (as far as the monitor allows).
+/// Returns the original window rect (and whether the render area was portrait) when it changed it.
+fn enlarge_window(top: HWND, render: HWND, android: (u32, u32)) -> Option<(RECT, bool)> {
+    use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST};
+    let (rw, rh) = render_size(render)?;
+    if rw < 64 || rh < 64 {
+        return None;
+    }
+    let target_long = android.0.max(android.1) as f64;
+    let mut scale = target_long / rw.max(rh) as f64;
+    unsafe {
+        let mut win = RECT::default();
+        GetWindowRect(top, &mut win).ok()?;
+        let (tw, th) = (win.right - win.left, win.bottom - win.top);
+        let (extra_w, extra_h) = ((tw - rw).max(0), (th - rh).max(0));
+        let mon = MonitorFromWindow(top, MONITOR_DEFAULTTONEAREST);
+        let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+        if !GetMonitorInfoW(mon, &mut mi).as_bool() {
+            return None;
+        }
+        let work = mi.rcWork;
+        let (ww, wh) = (work.right - work.left, work.bottom - work.top);
+        scale = scale.min((ww - extra_w) as f64 / rw as f64).min((wh - extra_h) as f64 / rh as f64);
+        if scale <= 1.05 {
+            return None;
+        }
+        let nw = extra_w + (rw as f64 * scale) as i32;
+        let nh = extra_h + (rh as f64 * scale) as i32;
+        let x = win.left.clamp(work.left, (work.right - nw).max(work.left));
+        let y = win.top.clamp(work.top, (work.bottom - nh).max(work.top));
+        SetWindowPos(top, Some(HWND_BOTTOM), x, y, nw, nh, SWP_NOACTIVATE).ok()?;
+        // Let LDPlayer lay out and redraw at the new size.
+        std::thread::sleep(Duration::from_millis(500));
+        let now = render_size(render).unwrap_or((rw, rh));
+        tracing::info!("gpu: enlarged LDPlayer window, render area {rw}x{rh} → {}x{} (Android {}x{})", now.0, now.1, android.0, android.1);
+        Some((win, rh > rw))
     }
 }
 
@@ -238,6 +303,8 @@ impl Encoder {
                 // few seconds, which keeps the stream free of periodic size spikes.
                 set_codec(c, &CODECAPI_AVEncMPVGOPSize, variant_u32(fps * 10), "GOP size");
                 set_codec(c, &CODECAPI_AVEncMPVDefaultBPictureCount, variant_u32(0), "B frames");
+                // Spend the GPU on quality: hardware encoders are far faster than we need anyway.
+                set_codec(c, &CODECAPI_AVEncCommonQualityVsSpeed, variant_u32(100), "quality vs speed");
             }
 
             let out = MFCreateMediaType()?;

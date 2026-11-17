@@ -21,9 +21,9 @@ Mở lại `ldremote.exe` khi agent đang chạy, hoặc bấm vào biểu tư�
 | Chất lượng | độ phân giải gốc (vd 1600×900), ~60 fps, bitrate tự chỉnh 0,8–20 Mbps theo mạng | 1280×720, ~40 fps, bitrate cố định |
 | Điều kiện | cửa sổ LDPlayer phải nằm trên màn hình (bị che vẫn được) | không |
 
-Ở chế độ GPU, scrcpy chỉ dùng để điều khiển (`video=false`); toạ độ chạm được đổi từ kích thước video sang kích thước màn hình Android. Khi có người xem, agent tự mở cửa sổ đang bị thu nhỏ (hoặc kéo nó về nếu nằm ngoài màn hình), đặt xuống dưới cùng mọi cửa sổ, và thu nhỏ lại khi hết người xem. Không tìm thấy cửa sổ, không có encoder phần cứng, hoặc capture lỗi thì tự quay về scrcpy.
+Ở chế độ GPU, scrcpy chỉ dùng để điều khiển (`video=false`); toạ độ chạm được đổi từ kích thước video sang kích thước màn hình Android. Khi có người xem, agent tự mở cửa sổ đang bị thu nhỏ (hoặc kéo nó về nếu nằm ngoài màn hình), đặt xuống dưới cùng mọi cửa sổ, và thu nhỏ lại khi hết người xem. LDPlayer vẽ Android đúng bằng kích thước cửa sổ, nên nếu cửa sổ nhỏ hơn độ phân giải Android (vd 852×480 cho máy 1280×720) thì agent phóng to cửa sổ lên (vừa màn hình) để hình nét, rồi trả lại kích thước cũ khi hết người xem. Không tìm thấy cửa sổ, không có encoder phần cứng, hoặc capture lỗi thì tự quay về scrcpy.
 
-Bitrate: người xem WebRTC dùng ước lượng băng thông TWCC của str0m (lấy 85 %); người xem WebSocket bắt đầu 6 Mbps, giảm 30 % khi bị nghẽn, tăng 15 % sau mỗi 3 giây ổn định. Encoder dùng GOP dài và chỉ tạo keyframe khi cần (người xem mới, mất gói), nên không còn các đợt keyframe định kỳ làm giật hình.
+Bitrate ưu tiên chất lượng: người xem WebRTC bắt đầu ở 12 Mbps, agent giữ tối thiểu 8 Mbps (đệm khi màn hình đứng yên) để ước lượng băng thông TWCC của str0m không tụt, rồi dùng 90 % ước lượng (tối đa `gpu_max_bit_rate`); người xem WebSocket bắt đầu 12 Mbps (tối đa 12 Mbps), giảm 30 % khi bị nghẽn, tăng 15 % sau mỗi 3 giây ổn định. Encoder dùng GOP dài và chỉ tạo keyframe khi cần (người xem mới, mất gói), nên không còn các đợt keyframe định kỳ làm giật hình.
 
 Đổi nguồn hình trong trang cài đặt (cần mở lại agent), hoặc `video_source` (`auto` | `scrcpy`) và `gpu_max_bit_rate` trong `config.json`.
 
