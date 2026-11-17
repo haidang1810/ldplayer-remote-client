@@ -80,6 +80,11 @@ struct Viewer {
     rtc_deadline: Option<Instant>,
     /// Latest WebRTC send-side bandwidth estimate for this viewer (bps).
     bwe: Option<u64>,
+    /// Bit rate cap for this WebRTC viewer: lowered when the browser reports packet loss,
+    /// raised again while it stays clean.
+    rtc_cap: u32,
+    rtc_loss_at: Option<Instant>,
+    rtc_clear_since: Instant,
     inflight: VecDeque<(u32, f64)>,
     rtt_samples: VecDeque<f64>,
     base_rtt: Option<f64>,
@@ -236,6 +241,9 @@ impl Stream {
             rtc_active: false,
             rtc_deadline: None,
             bwe: None,
+            rtc_cap: self.hub.gpu_max_bitrate,
+            rtc_loss_at: None,
+            rtc_clear_since: Instant::now(),
             inflight: VecDeque::new(),
             rtt_samples: VecDeque::new(),
             base_rtt: None,
@@ -637,11 +645,17 @@ impl Stream {
             }
         }
         let mut target = if has_ws { self.ws_cap } else { max };
-        for v in self.viewers.values().filter(|v| v.rtc_sending) {
-            if let Some(bwe) = v.bwe {
-                // Leave room for retransmissions and key frames.
-                target = target.min((bwe as f64 * 0.9) as u32);
+        // WebRTC: full rate unless the browser reports real packet loss.
+        for v in self.viewers.values_mut().filter(|v| v.rtc_sending) {
+            if v.rtc_loss_at.is_some_and(|t| t.elapsed() < Duration::from_secs(2)) {
+                v.rtc_cap = ((v.rtc_cap as f64 * 0.75) as u32).max(GPU_MIN_BITRATE);
+                v.rtc_loss_at = None;
+                v.rtc_clear_since = Instant::now();
+            } else if v.rtc_cap < max && v.rtc_clear_since.elapsed() > Duration::from_secs(3) {
+                v.rtc_cap = ((v.rtc_cap as f64 * 1.2) as u32).min(max);
+                v.rtc_clear_since = Instant::now();
             }
+            target = target.min(v.rtc_cap);
         }
         let target = target.clamp(GPU_MIN_BITRATE, max);
         let change = (target as f64 - self.bitrate as f64).abs() / self.bitrate.max(1) as f64;
@@ -723,6 +737,16 @@ impl Stream {
                     }
                     "rtc-stop" => self.fail_rtc(id, "stopped by viewer"),
                     "diag" => self.log_diag(id, &msg),
+                    "rtc-net" => {
+                        // Once a second from the browser: packets lost on the WebRTC path.
+                        let lost = msg.get("lost").and_then(Value::as_u64).unwrap_or(0);
+                        let pct = msg.get("lossPct").and_then(Value::as_f64).unwrap_or(0.0);
+                        if let Some(v) = self.viewers.get_mut(&id) {
+                            if lost >= 5 && pct >= 2.0 {
+                                v.rtc_loss_at = Some(Instant::now());
+                            }
+                        }
+                    }
                     "pause" => {
                         if let Some(v) = self.viewers.get_mut(&id) {
                             v.paused = true;

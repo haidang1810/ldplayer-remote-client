@@ -8,7 +8,7 @@ use anyhow::{anyhow, Context, Result};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use str0m::bwe::{Bitrate, BweKind};
+use str0m::bwe::BweKind;
 use str0m::change::{SdpAnswer, SdpPendingOffer};
 use str0m::channel::ChannelId;
 use str0m::media::{Direction, Frequency, MediaKind, MediaTime, Mid};
@@ -129,15 +129,11 @@ async fn run(stun: Vec<String>, max_bps: u64, mut rx: mpsc::UnboundedReceiver<Rt
     let host_ip = primary_ip().ok_or_else(|| anyhow!("no network interface"))?;
     let local = SocketAddr::new(host_ip, port);
 
-    let mut rtc = RtcConfig::new()
-        .clear_codecs()
-        .enable_h264(true)
-        // Start high (quality first) instead of ramping up from a few hundred kbit/s.
-        .enable_bwe(Some(Bitrate::bps(max_bps.min(12_000_000))))
-        .build(Instant::now());
-    // Keep at least 8 Mbit/s flowing (padding on a still screen) so the estimate does not sag and
-    // the first moves after a pause are not blurry while it climbs back.
-    rtc.bwe().set_bitrate(Bitrate::bps(max_bps.min(8_000_000)), Bitrate::bps(max_bps));
+    // No send-side bandwidth estimation: str0m paces packets at its estimate, which sat at
+    // ~5 Mbit/s on links with no loss at all (even on the LAN), holding back bitrate and making
+    // key frames queue. The hub backs off on loss the browser reports instead (`rtc-net`).
+    let _ = max_bps;
+    let mut rtc = RtcConfig::new().clear_codecs().enable_h264(true).build(Instant::now());
     rtc.add_local_candidate(Candidate::host(local, "udp")?);
     let mut public_addr = None;
     for server in &stun {
