@@ -68,6 +68,8 @@ pub fn stun_servers(ice_browser: &serde_json::Value) -> Vec<String> {
             }
         }
     }
+    // Public fallback in case the relay's STUN port is firewalled.
+    out.push("stun.l.google.com:19302".into());
     out
 }
 
@@ -134,24 +136,32 @@ async fn run(stun: Vec<String>, max_bps: u64, mut rx: mpsc::UnboundedReceiver<Rt
         .build(Instant::now());
     rtc.bwe().set_bitrate(Bitrate::kbps(300), Bitrate::bps(max_bps));
     rtc.add_local_candidate(Candidate::host(local, "udp")?);
+    let mut public_addr = None;
     for server in &stun {
         match stun_binding(&socket, server).await {
-            Ok(public) if public != local => {
-                if let Ok(c) = Candidate::server_reflexive(public, local, "udp") {
-                    rtc.add_local_candidate(c);
+            Ok(public) => {
+                if public != local {
+                    if let Ok(c) = Candidate::server_reflexive(public, local, "udp") {
+                        rtc.add_local_candidate(c);
+                    }
                 }
+                public_addr = Some(public);
                 break;
             }
-            Ok(_) => break,
-            Err(e) => tracing::debug!("stun {server}: {e:#}"),
+            Err(e) => tracing::warn!("webrtc: STUN {server} failed: {e:#}"),
         }
     }
+    tracing::info!("webrtc: local candidates host {local}, public {}", public_addr.map_or("none (STUN failed)".to_string(), |a| a.to_string()));
 
     let mut api = rtc.sdp_api();
     let mid: Mid = api.add_media(MediaKind::Video, Direction::SendOnly, Some("ldplayer".into()), Some("video".into()), None);
     let _control: ChannelId = api.add_channel("control".into());
     let (offer, pending) = api.apply().ok_or_else(|| anyhow!("no SDP changes"))?;
     let mut pending: Option<SdpPendingOffer> = Some(pending);
+    // Browsers start trickling candidates while they create the answer, so some arrive before it;
+    // keep them until the answer is applied or they would be lost (and remote viewers never connect).
+    let mut early_candidates: Vec<Candidate> = Vec::new();
+    let mut remote_kinds: Vec<String> = Vec::new();
     events(RtcEvent::Offer(offer.to_sdp_string()));
 
     let mut connected = false;
@@ -172,11 +182,12 @@ async fn run(stun: Vec<String>, max_bps: u64, mut rx: mpsc::UnboundedReceiver<Rt
                 Output::Event(ev) => match ev {
                     Event::Connected => {
                         connected = true;
-                        events(RtcEvent::Connected(format!("{} via {host_ip}", if stun.is_empty() { "host" } else { "host/srflx" })));
+                        events(RtcEvent::Connected(format!("local {host_ip}, remote candidates: {}", remote_kinds.join("/"))));
                     }
                     Event::IceConnectionStateChange(IceConnectionState::Disconnected) => {
                         return Err(anyhow!("ICE disconnected"));
                     }
+                    Event::IceConnectionStateChange(s) => tracing::debug!("webrtc: ICE {s:?}"),
                     Event::KeyframeRequest(_) => events(RtcEvent::KeyframeRequest),
                     Event::ChannelData(d) => events(RtcEvent::Data(d.binary, d.data)),
                     Event::EgressBitrateEstimate(BweKind::Twcc { estimate, .. }) => {
@@ -212,12 +223,24 @@ async fn run(stun: Vec<String>, max_bps: u64, mut rx: mpsc::UnboundedReceiver<Rt
                     let answer = SdpAnswer::from_sdp_string(&sdp).map_err(|e| anyhow!("bad answer: {e}"))?;
                     if let Some(p) = pending.take() {
                         rtc.sdp_api().accept_answer(p, answer)?;
+                        for c in early_candidates.drain(..) {
+                            rtc.add_remote_candidate(c);
+                        }
                     }
                 }
                 Some(RtcCmd::Candidate(c)) => {
                     // Browsers hide host addresses behind mDNS names; those fail to parse and are skipped.
                     if let Ok(c) = Candidate::from_sdp_string(c.trim_start_matches("a=")) {
-                        rtc.add_remote_candidate(c);
+                        let kind = format!("{:?}", c.kind()).to_lowercase();
+                        if !remote_kinds.contains(&kind) {
+                            tracing::info!("webrtc: remote candidate {kind} {}", c.addr());
+                            remote_kinds.push(kind);
+                        }
+                        if pending.is_some() {
+                            early_candidates.push(c);
+                        } else {
+                            rtc.add_remote_candidate(c);
+                        }
                     }
                 }
                 Some(RtcCmd::Frame(data, pts)) => {

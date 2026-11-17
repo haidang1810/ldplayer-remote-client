@@ -42,6 +42,8 @@ const GPU_KEYFRAME_COOLDOWN: Duration = Duration::from_millis(300);
 /// Adaptive bit rate bounds for the GPU encoder.
 const GPU_MIN_BITRATE: u32 = 800_000;
 const GPU_START_BITRATE: u32 = 6_000_000;
+/// WebSocket viewers go through the relay over TCP: keep them modest.
+const GPU_WS_MAX_BITRATE: u32 = 8_000_000;
 /// Give WebRTC this long to connect before the viewer stays on the WebSocket path.
 const RTC_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const DIAG_NUMBERS: [&str; 10] = ["ms", "keyframes", "fps", "mbps", "lost", "lossPct", "rtt", "buffer", "freezes", "freezeMs"];
@@ -286,6 +288,10 @@ impl Stream {
         let hub = self.hub.clone();
         let serial = self.serial.clone();
         let try_gpu = hub.gpu_mode && !self.gpu_failed;
+        self.bitrate = GPU_START_BITRATE.min(self.hub.gpu_max_bitrate);
+        self.ws_cap = self.bitrate.min(GPU_WS_MAX_BITRATE);
+        self.ws_congested_at = None;
+        self.ws_clear_since = Instant::now();
         let start_bitrate = self.bitrate;
         tokio::spawn(async move {
             let (etx, mut erx) = mpsc::unbounded_channel::<Event>();
@@ -616,6 +622,9 @@ impl Stream {
     /// WebSocket viewers only tell us when they fall behind, so back off then and creep up after.
     fn adapt_bitrate(&mut self) {
         let Some(src) = &self.gpu else { return };
+        if self.viewers.is_empty() {
+            return;
+        }
         let max = self.hub.gpu_max_bitrate;
         let has_ws = self.viewers.values().any(|v| !v.rtc_active);
         if has_ws {
@@ -623,7 +632,8 @@ impl Stream {
                 self.ws_cap = ((self.ws_cap as f64 * 0.7) as u32).max(GPU_MIN_BITRATE);
                 self.ws_clear_since = Instant::now();
             } else if self.ws_clear_since.elapsed() > Duration::from_secs(3) {
-                self.ws_cap = ((self.ws_cap as f64 * 1.15) as u32).min(max);
+                self.ws_cap = ((self.ws_cap as f64 * 1.15) as u32).min(max).min(GPU_WS_MAX_BITRATE);
+                self.ws_clear_since = Instant::now();
             }
         }
         let mut target = if has_ws { self.ws_cap } else { max };
