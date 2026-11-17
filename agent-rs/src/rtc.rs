@@ -6,6 +6,7 @@
 // browser has TURN, so when no direct path exists it reaches us through its relay candidate.
 use anyhow::{anyhow, Context, Result};
 use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use str0m::bwe::BweKind;
@@ -23,6 +24,53 @@ pub enum RtcCmd {
     Candidate(String),
     /// Annex B access unit and its scrcpy PTS in microseconds.
     Frame(Arc<[u8]>, u64),
+    /// Video bit rate now being encoded (bps): packets are paced a bit above it.
+    Bitrate(u64),
+}
+
+/// Packets may leave at most this much faster than the video bit rate.
+const PACE_FACTOR: f64 = 1.5;
+/// Never pace slower than this (bps), so key frames still clear quickly at low bit rates.
+const PACE_MIN_BPS: u64 = 8_000_000;
+/// Bytes that may go out back to back before pacing kicks in (a few packets).
+const PACE_BURST: f64 = 6_000.0;
+
+fn pace_rate(bitrate: u64) -> u64 {
+    ((bitrate as f64 * PACE_FACTOR) as u64).max(PACE_MIN_BPS)
+}
+
+/// Sends packets on its own thread, spread out at `rate` bps. Without this a key frame (100+
+/// packets) leaves at line rate, and TURN relays / routers on the way drop much of the burst
+/// (measured: 60+ packets lost per key frame at 2 Mbit/s average), which freezes desktop Chrome
+/// until the next key frame. std's sleep is high resolution on Windows, tokio's timer is not.
+fn spawn_pacer(socket: std::net::UdpSocket, rate: Arc<AtomicU64>) -> std::sync::mpsc::Sender<(Vec<u8>, SocketAddr)> {
+    let (tx, rx) = std::sync::mpsc::channel::<(Vec<u8>, SocketAddr)>();
+    std::thread::spawn(move || {
+        let mut tokens = PACE_BURST;
+        let mut last = Instant::now();
+        while let Ok((pkt, dst)) = rx.recv() {
+            let len = pkt.len() as f64;
+            loop {
+                let now = Instant::now();
+                let bytes_per_sec = rate.load(Ordering::Relaxed) as f64 / 8.0;
+                tokens = (tokens + now.duration_since(last).as_secs_f64() * bytes_per_sec).min(PACE_BURST);
+                last = now;
+                if tokens >= len {
+                    break;
+                }
+                std::thread::sleep(Duration::from_secs_f64((len - tokens) / bytes_per_sec));
+            }
+            tokens -= len;
+            // The socket is non-blocking (shared with tokio): retry briefly if the buffer is full.
+            for _ in 0..50 {
+                match socket.send_to(&pkt, dst) {
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => std::thread::sleep(Duration::from_millis(1)),
+                    _ => break,
+                }
+            }
+        }
+    });
+    tx
 }
 
 pub enum RtcEvent {
@@ -124,7 +172,11 @@ async fn stun_binding(socket: &UdpSocket, server: &str) -> Result<SocketAddr> {
 }
 
 async fn run(stun: Vec<String>, max_bps: u64, mut rx: mpsc::UnboundedReceiver<RtcCmd>, events: &(impl Fn(RtcEvent) + Send + Sync)) -> Result<()> {
-    let socket = UdpSocket::bind("0.0.0.0:0").await.context("binding UDP")?;
+    let std_socket = std::net::UdpSocket::bind("0.0.0.0:0").context("binding UDP")?;
+    std_socket.set_nonblocking(true)?;
+    let pace = Arc::new(AtomicU64::new(pace_rate(max_bps)));
+    let pacer = spawn_pacer(std_socket.try_clone()?, pace.clone());
+    let socket = UdpSocket::from_std(std_socket)?;
     let port = socket.local_addr()?.port();
     let host_ip = primary_ip().ok_or_else(|| anyhow!("no network interface"))?;
     let local = SocketAddr::new(host_ip, port);
@@ -176,7 +228,7 @@ async fn run(stun: Vec<String>, max_bps: u64, mut rx: mpsc::UnboundedReceiver<Rt
             match rtc.poll_output()? {
                 Output::Timeout(t) => break t,
                 Output::Transmit(t) => {
-                    let _ = socket.send_to(&t.contents, t.destination).await;
+                    let _ = pacer.send((t.contents.to_vec(), t.destination));
                 }
                 Output::Event(ev) => match ev {
                     Event::Connected => {
@@ -218,6 +270,7 @@ async fn run(stun: Vec<String>, max_bps: u64, mut rx: mpsc::UnboundedReceiver<Rt
             }
             cmd = rx.recv() => match cmd {
                 None => return Ok(()),
+                Some(RtcCmd::Bitrate(bps)) => pace.store(pace_rate(bps), Ordering::Relaxed),
                 Some(RtcCmd::Answer(sdp)) => {
                     let answer = SdpAnswer::from_sdp_string(&sdp).map_err(|e| anyhow!("bad answer: {e}"))?;
                     if let Some(p) = pending.take() {

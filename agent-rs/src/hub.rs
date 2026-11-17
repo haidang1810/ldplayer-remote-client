@@ -84,6 +84,9 @@ struct Viewer {
     /// raised again while it stays clean.
     rtc_cap: u32,
     rtc_loss_at: Option<Instant>,
+    /// Lowest round trip the browser has reported (ms): a queue building up shows as RTT
+    /// climbing well above it, often before any packet is lost.
+    rtc_base_rtt: Option<f64>,
     rtc_clear_since: Instant,
     inflight: VecDeque<(u32, f64)>,
     rtt_samples: VecDeque<f64>,
@@ -243,6 +246,7 @@ impl Stream {
             bwe: None,
             rtc_cap: self.hub.gpu_max_bitrate,
             rtc_loss_at: None,
+            rtc_base_rtt: None,
             rtc_clear_since: Instant::now(),
             inflight: VecDeque::new(),
             rtt_samples: VecDeque::new(),
@@ -665,6 +669,11 @@ impl Stream {
             }
             self.bitrate = target;
             src.send(GpuCtl::Bitrate(target));
+            for v in self.viewers.values() {
+                if let Some(peer) = &v.rtc {
+                    peer.send(RtcCmd::Bitrate(target as u64));
+                }
+            }
         }
     }
 
@@ -741,8 +750,16 @@ impl Stream {
                         // Once a second from the browser: packets lost on the WebRTC path.
                         let lost = msg.get("lost").and_then(Value::as_u64).unwrap_or(0);
                         let pct = msg.get("lossPct").and_then(Value::as_f64).unwrap_or(0.0);
+                        let rtt = msg.get("rtt").and_then(Value::as_f64);
                         if let Some(v) = self.viewers.get_mut(&id) {
-                            if lost >= 5 && pct >= 2.0 {
+                            let queued = match (rtt, v.rtc_base_rtt) {
+                                (Some(r), Some(base)) => r > base * 3.0 && r > base + 100.0,
+                                _ => false,
+                            };
+                            if let Some(r) = rtt.filter(|r| *r > 0.0) {
+                                v.rtc_base_rtt = Some(v.rtc_base_rtt.map_or(r, |b| b.min(r)));
+                            }
+                            if (lost >= 5 && pct >= 2.0) || queued {
                                 v.rtc_loss_at = Some(Instant::now());
                             }
                         }
