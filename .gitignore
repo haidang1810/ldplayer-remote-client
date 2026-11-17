@@ -5,3 +5,4 @@ certs/
 *.env
 .claude/
 .machine-id
+agent-rs/target/

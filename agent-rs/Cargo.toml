@@ -1,0 +1,39 @@
+[package]
+name = "ldremote"
+version = "0.2.0"
+edition = "2021"
+description = "LDPlayer Remote agent: system-tray app that streams LDPlayer instances to the relay"
+publish = false
+
+[dependencies]
+anyhow = "1"
+bytes = "1"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+rand = "0.9"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tao = "0.37"
+tiny_http = "0.12"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "process", "sync", "time", "fs"] }
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "handshake", "rustls-tls-webpki-roots"] }
+tracing = "0.1"
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+tray-icon = "0.26"
+uuid = { version = "1", features = ["v4"] }
+winreg = "0.56"
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Media",
+  "Win32_System_Threading",
+  "Win32_UI_WindowsAndMessaging",
+] }
+str0m = { version = "0.25", default-features = false, features = ["rust-crypto"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

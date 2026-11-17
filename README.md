@@ -1,7 +1,13 @@
 # LDPlayer Remote: client (agent)
 
 Phần chạy trên **PC có LDPlayer**: lấy hình từ bên trong Android bằng `scrcpy-server` v4.1
-(H.264), nhận lệnh cảm ứng và bàn phím, rồi phát luồng ra trình duyệt. Có hai chế độ:
+(H.264), nhận lệnh cảm ứng và bàn phím, rồi phát luồng ra trình duyệt.
+
+> **Mới:** [`agent-rs/`](agent-rs/README.md) là agent viết bằng Rust: một file `ldremote.exe` chạy nền ở
+> khay hệ thống, nhập API key qua trang cài đặt, chạy được trên Windows mới cài (không cần Node).
+> Agent Node bên dưới vẫn dùng được cho tới khi bản Rust thay hẳn.
+
+Agent Node có hai chế độ:
 
 | Chế độ | Lệnh | Dùng khi |
 |---|---|---|
