@@ -111,7 +111,8 @@ impl Session {
 
     /// Starts scrcpy-server and returns once the video stream header has been read.
     /// Returns the session and the device name.
-    pub async fn start(adb: &Path, serial: &str, jar: &Path, video: &VideoOpts, events: mpsc::UnboundedSender<Event>) -> Result<(Self, String)> {
+    /// With `video` None, scrcpy only carries control (the GPU source provides the picture).
+    pub async fn start(adb: &Path, serial: &str, jar: &Path, video: Option<&VideoOpts>, events: mpsc::UnboundedSender<Event>) -> Result<(Self, String)> {
         let jar_s = jar.to_string_lossy().to_string();
         run(adb, &["-s", serial, "push", &jar_s, REMOTE_PATH], Duration::from_secs(60)).await?;
 
@@ -135,21 +136,26 @@ impl Session {
             "com.genymobile.scrcpy.Server".into(),
             VERSION.into(),
         ];
-        let opts: Vec<(&str, String)> = vec![
+        let mut opts: Vec<(&str, String)> = vec![
             ("scid", scid.clone()),
             ("log_level", "info".into()),
             ("tunnel_forward", "true".into()),
             ("audio", "false".into()),
             ("control", "true".into()),
-            ("video_codec", "h264".into()),
-            ("max_size", video.max_size.to_string()),
-            ("video_bit_rate", video.bit_rate.to_string()),
-            ("max_fps", video.max_fps.to_string()),
-            // A key frame every 3 s lets a viewer that dropped frames recover without a reset.
-            ("video_codec_options", "i-frame-interval:int=3".into()),
             ("clipboard_autosync", "false".into()),
             ("cleanup", "true".into()),
         ];
+        match video {
+            Some(video) => opts.extend([
+                ("video_codec", "h264".to_string()),
+                ("max_size", video.max_size.to_string()),
+                ("video_bit_rate", video.bit_rate.to_string()),
+                ("max_fps", video.max_fps.to_string()),
+                // A key frame every 3 s lets a viewer that dropped frames recover without a reset.
+                ("video_codec_options", "i-frame-interval:int=3".to_string()),
+            ]),
+            None => opts.push(("video", "false".into())),
+        }
         for (k, v) in opts {
             args.push(safe(format!("{k}={v}"))?);
         }
@@ -179,7 +185,7 @@ impl Session {
         // adb accepts the local connection even before the server listens; the dummy byte is how
         // we know the tunnel really reached scrcpy-server.
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-        let mut video_sock = loop {
+        let mut first_sock = loop {
             if let Some(Ok(Some(status))) = session.child.as_mut().map(|c| c.try_wait()) {
                 bail!("scrcpy-server exited ({status}) before accepting a connection");
             }
@@ -195,20 +201,24 @@ impl Session {
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         };
-        let control_sock = TcpStream::connect(("127.0.0.1", port)).await?;
-        control_sock.set_nodelay(true)?;
-
+        // The device name comes on the first socket: video, or control when video is off.
         let mut name = [0u8; 64];
-        video_sock.read_exact(&mut name).await?;
+        first_sock.read_exact(&mut name).await?;
         let end = name.iter().position(|&b| b == 0).unwrap_or(64);
         let device_name = String::from_utf8_lossy(&name[..end]).into_owned();
-        let codec = video_sock.read_u32().await?;
-        match codec {
-            0 => bail!("device disabled the video stream"),
-            1 => bail!("scrcpy-server configuration error (see log)"),
-            CODEC_ID_H264 => {}
-            c => bail!("unexpected codec id {c:#x}"),
-        }
+        let (video_sock, control_sock) = if video.is_some() {
+            let control_sock = TcpStream::connect(("127.0.0.1", port)).await?;
+            control_sock.set_nodelay(true)?;
+            match first_sock.read_u32().await? {
+                0 => bail!("device disabled the video stream"),
+                1 => bail!("scrcpy-server configuration error (see log)"),
+                CODEC_ID_H264 => {}
+                c => bail!("unexpected codec id {c:#x}"),
+            }
+            (Some(first_sock), control_sock)
+        } else {
+            (None, first_sock)
+        };
 
         let closed = Arc::new(AtomicBool::new(false));
         let close = {
@@ -222,7 +232,7 @@ impl Session {
         };
 
         // video
-        {
+        if let Some(video_sock) = video_sock {
             let events = events.clone();
             let close = close.clone();
             session.tasks.push(tokio::spawn(async move {

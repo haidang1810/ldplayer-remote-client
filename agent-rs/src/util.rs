@@ -75,5 +75,15 @@ pub fn local_dir() -> PathBuf {
 
 /// Opens a URL or file with the default handler (browser, Notepad, Explorer).
 pub fn open(target: &str) {
-    let _ = std::process::Command::new("explorer.exe").arg(target).spawn();
+    #[cfg(windows)]
+    unsafe {
+        use windows_sys::Win32::UI::Shell::ShellExecuteW;
+        use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+        let wide = |s: &str| s.encode_utf16().chain(std::iter::once(0)).collect::<Vec<u16>>();
+        let (verb, file) = (wide("open"), wide(target));
+        let r = ShellExecuteW(std::ptr::null_mut(), verb.as_ptr(), file.as_ptr(), std::ptr::null(), std::ptr::null(), SW_SHOWNORMAL);
+        if r as isize <= 32 {
+            tracing::warn!("could not open {target} (ShellExecute {})", r as isize);
+        }
+    }
 }

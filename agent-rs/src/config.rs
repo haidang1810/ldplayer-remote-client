@@ -23,6 +23,11 @@ pub struct Config {
     pub max_fps: u32,
     /// WebSocket viewers: drop frames once this many bytes are waiting to be sent.
     pub max_buffered_kb: u32,
+    /// "auto": capture the LDPlayer window and encode on the GPU, falling back to scrcpy;
+    /// "scrcpy": always use the emulator's own encoder.
+    pub video_source: String,
+    /// GPU mode: upper bound for the adaptive bit rate.
+    pub gpu_max_bit_rate: u32,
 }
 
 impl Default for Config {
@@ -37,6 +42,8 @@ impl Default for Config {
             bit_rate: 8_000_000,
             max_fps: 60,
             max_buffered_kb: 256,
+            video_source: "auto".into(),
+            gpu_max_bit_rate: 20_000_000,
         }
     }
 }

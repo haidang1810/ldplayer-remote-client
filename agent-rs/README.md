@@ -10,6 +10,23 @@ Một file `ldremote.exe` (~9 MB) chạy nền ở khay hệ thống trên PC c�
 
 Một key dùng được cho nhiều PC: mỗi PC tự tạo mã máy riêng nên hiện thành từng máy trên web.
 
+Mở lại `ldremote.exe` khi agent đang chạy, hoặc bấm vào biểu tượng ở khay, đều mở trang cài đặt. Khi tự chạy cùng Windows (`--autostart`) thì agent không mở trình duyệt, trừ khi chưa có API key. *Xem log* mở file log hôm nay bằng Notepad.
+
+## Nguồn hình
+
+| | **Tự động (GPU)**, mặc định | **scrcpy** |
+|---|---|---|
+| Lấy hình | chụp cửa sổ LDPlayer (Windows Graphics Capture), cắt đúng vùng Android | bên trong Android |
+| Nén | encoder phần cứng của card (NVENC / AMF / Quick Sync qua Media Foundation) | encoder phần mềm của máy ảo |
+| Chất lượng | độ phân giải gốc (vd 1600×900), ~60 fps, bitrate tự chỉnh 0,8–20 Mbps theo mạng | 1280×720, ~40 fps, bitrate cố định |
+| Điều kiện | cửa sổ LDPlayer phải nằm trên màn hình (bị che vẫn được) | không |
+
+Ở chế độ GPU, scrcpy chỉ dùng để điều khiển (`video=false`); toạ độ chạm được đổi từ kích thước video sang kích thước màn hình Android. Khi có người xem, agent tự mở cửa sổ đang bị thu nhỏ (hoặc kéo nó về nếu nằm ngoài màn hình), đặt xuống dưới cùng mọi cửa sổ, và thu nhỏ lại khi hết người xem. Không tìm thấy cửa sổ, không có encoder phần cứng, hoặc capture lỗi thì tự quay về scrcpy.
+
+Bitrate: người xem WebRTC dùng ước lượng băng thông TWCC của str0m (lấy 85 %); người xem WebSocket bắt đầu 6 Mbps, giảm 30 % khi bị nghẽn, tăng 15 % sau mỗi 3 giây ổn định. Encoder dùng GOP dài và chỉ tạo keyframe khi cần (người xem mới, mất gói), nên không còn các đợt keyframe định kỳ làm giật hình.
+
+Đổi nguồn hình trong trang cài đặt (cần mở lại agent), hoặc `video_source` (`auto` | `scrcpy`) và `gpu_max_bit_rate` trong `config.json`.
+
 - Cấu hình: `%APPDATA%\LDRemote\config.json` (đổi thư mục bằng biến `LDR_CONFIG_DIR`).
 - Log: `%LOCALAPPDATA%\LDRemote\logs\agent.<ngày>.log` (giữ 7 ngày, mức log đổi bằng `LDR_LOG`, vd `LDR_LOG=debug`).
 - Đổi thư mục LDPlayer trong trang cài đặt cần khởi động lại agent.
@@ -31,7 +48,8 @@ File ra ở `target/release/ldremote.exe`.
 | `relay.rs` | kết nối ra relay (`/agent`, `Authorization: Bearer <key>`, `X-Agent-Name`, `X-Machine-Id`), trả danh sách máy, mở channel cho từng người xem |
 | `hub.rs` | mỗi serial adb một actor: một phiên scrcpy chia cho mọi người xem; WebSocket có chống nghẽn theo ack, WebRTC khi trình duyệt xin |
 | `rtc.rs` | WebRTC bằng [str0m](https://github.com/algesten/str0m): H.264 của scrcpy đóng gói thẳng vào RTP, DataChannel nhận thao tác; ứng viên host + srflx (một lần STUN), trình duyệt có TURN |
-| `scrcpy.rs` | client scrcpy 4.1 (push jar, adb forward, đọc luồng video/điều khiển) |
+| `gpu.rs` | chế độ GPU: WGC → cắt + đổi NV12 bằng D3D11 video processor → H.264 phần cứng (Media Foundation), bitrate và keyframe điều khiển được |
+| `scrcpy.rs` | client scrcpy 4.1 (push jar, adb forward, đọc luồng video/điều khiển; hoặc chỉ điều khiển) |
 | `pacer.rs` | phát lại thao tác chạm đúng nhịp thời gian gốc |
 | `ldplayer.rs` | tìm LDPlayer, `ldconsole list2`, `adb devices` |
 | `settings.rs` | trang cài đặt trên 127.0.0.1 |

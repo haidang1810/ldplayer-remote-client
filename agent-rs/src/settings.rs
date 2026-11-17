@@ -48,6 +48,7 @@ pub fn start(shared: Arc<Shared>) -> std::io::Result<Settings> {
                             "api_key" if !v.is_empty() => cfg.api_key = v,
                             "name" if !v.is_empty() => cfg.name = v.chars().take(40).collect(),
                             "ldplayer_dir" => cfg.ldplayer_dir = v,
+                            "video_source" if v == "auto" || v == "scrcpy" => cfg.video_source = v,
                             _ => {}
                         }
                     }
@@ -95,8 +96,8 @@ body {{ margin:0; background:var(--bg); color:var(--text); font:15px/1.5 system-
 .card {{ width:min(480px,100%); background:var(--card); border:1px solid var(--line); border-radius:14px; padding:24px; }}
 h1 {{ font-size:20px; margin:0 0 4px; }} p {{ color:var(--muted); margin:0 0 18px; }}
 label {{ display:block; font-size:13px; color:var(--muted); margin:14px 0 6px; }}
-input {{ width:100%; padding:10px 12px; font:inherit; color:var(--text); background:#1f232c; border:1px solid var(--line); border-radius:9px; }}
-input:focus {{ outline:2px solid var(--accent); outline-offset:1px; }}
+input, select {{ width:100%; padding:10px 12px; font:inherit; color:var(--text); background:#1f232c; border:1px solid var(--line); border-radius:9px; }}
+input:focus, select:focus {{ outline:2px solid var(--accent); outline-offset:1px; }}
 button {{ margin-top:20px; width:100%; padding:11px; font:inherit; font-weight:600; border:0; border-radius:9px; background:var(--accent); color:#062b1e; cursor:pointer; }}
 .status {{ display:flex; gap:8px; align-items:center; padding:10px 12px; background:#1f232c; border-radius:9px; }}
 .dot {{ width:10px; height:10px; border-radius:50%; background:var(--muted); }} .dot.on {{ background:var(--accent); }}
@@ -105,7 +106,7 @@ small {{ color:var(--muted); }} a {{ color:var(--accent); }}
 </style></head><body>
 <form class="card" method="post" autocomplete="off">
   <h1>LD Remote</h1>
-  <p>Agent chạy nền trên PC này để điều khiển LDPlayer từ trình duyệt.</p>
+  <p>Agent đang chạy nền ở <b>khay hệ thống</b> (góc dưới bên phải, cạnh đồng hồ). Đóng trang này không tắt agent; bấm vào biểu tượng điện thoại ở khay để mở lại trang này, chuột phải để thoát.</p>
   {notice}
   <div class="status"><span class="dot" id="dot"></span><span id="status">…</span></div>
   <label for="relay_url">Địa chỉ server</label>
@@ -115,8 +116,14 @@ small {{ color:var(--muted); }} a {{ color:var(--accent); }}
   <small>Tạo key trên trang web: đăng nhập → Tài khoản → API key. Một key dùng được cho nhiều PC.</small>
   <label for="name">Tên PC hiển thị trên web</label>
   <input id="name" name="name" value="{name}" maxlength="40">
-  <label for="ldplayer_dir">Thư mục LDPlayer <small>(để trống: tự tìm)</small></label>
+  <label for="ldplayer_dir">Thư mục LDPlayer <small>(để trống: tự tìm; đổi xong cần thoát và mở lại agent)</small></label>
   <input id="ldplayer_dir" name="ldplayer_dir" value="{ld}" placeholder="D:\LDPlayer\LDPlayer14">
+  <label for="video_source">Nguồn hình <small>(đổi xong cần thoát và mở lại agent)</small></label>
+  <select id="video_source" name="video_source">
+    <option value="auto"{auto_sel}>Tự động: chụp cửa sổ LDPlayer, nén bằng GPU (nét, mượt hơn)</option>
+    <option value="scrcpy"{scrcpy_sel}>scrcpy: nén bên trong máy ảo (không cần hiện cửa sổ)</option>
+  </select>
+  <small>Chế độ GPU cần cửa sổ LDPlayer nằm trên màn hình (bị che vẫn được). Agent tự mở lại cửa sổ đang thu nhỏ và đưa nó xuống dưới cùng khi có người xem.</small>
   <button type="submit">Lưu và kết nối</button>
 </form>
 <script>
@@ -134,5 +141,7 @@ poll(); setInterval(poll, 2000);
         relay = html_escape(&cfg.relay_url),
         name = html_escape(&cfg.name),
         ld = html_escape(&cfg.ldplayer_dir),
+        auto_sel = if cfg.video_source == "scrcpy" { "" } else { " selected" },
+        scrcpy_sel = if cfg.video_source == "scrcpy" { " selected" } else { "" },
     )
 }

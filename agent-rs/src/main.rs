@@ -3,6 +3,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod config;
+mod gpu;
 mod hub;
 mod ldplayer;
 mod pacer;
@@ -17,16 +18,36 @@ use std::time::{Duration, Instant};
 use tao::event::{Event, StartCause};
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
 use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
-use tray_icon::{Icon, TrayIconBuilder};
+use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
 use config::{Config, Shared, Status};
 
 const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 const RUN_VALUE: &str = "LDRemote";
 
+/// Started by Windows at logon (Run key): stay quiet in the tray.
+const AUTOSTART_ARG: &str = "--autostart";
+
+fn settings_url_file() -> std::path::PathBuf {
+    util::local_dir().join("settings.url")
+}
+
 fn main() {
+    #[cfg(windows)]
+    unsafe {
+        // Real pixel coordinates for window capture and cropping on scaled (125 %, 150 %) displays.
+        use windows::Win32::UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
+        let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    }
+    if std::env::args().nth(1).as_deref() == Some("--gpu-test") {
+        return gpu_test();
+    }
+    let autostarted = std::env::args().any(|a| a == AUTOSTART_ARG);
     if !single_instance() {
-        // Already running: just show its settings page would need IPC; keep it simple.
+        // Already running (the user double-clicked the exe again): show its settings page.
+        if let Ok(url) = std::fs::read_to_string(settings_url_file()) {
+            util::open(url.trim());
+        }
         return;
     }
     #[cfg(windows)]
@@ -59,7 +80,12 @@ fn main() {
     };
     rt.spawn(relay::run(shared.clone(), hub.clone()));
 
-    if !shared.config().is_complete() {
+    let _ = std::fs::write(settings_url_file(), &settings.url);
+    if autostart_enabled() {
+        let _ = set_autostart(true); // refresh the Run entry (path and --autostart flag)
+    }
+    // Opened by hand: show the settings page right away so it is obvious the agent is running.
+    if !autostarted || !shared.config().is_complete() {
         util::open(&settings.url);
     }
 
@@ -90,16 +116,25 @@ fn run_tray(shared: Arc<Shared>, hub: Arc<hub::Hub>, rt: tokio::runtime::Runtime
     let mut last_status: Option<(Status, usize)> = None;
     let mut rt = Some(rt);
     let menu_rx = MenuEvent::receiver();
+    let tray_rx = TrayIconEvent::receiver();
 
     event_loop.run(move |event, _, flow| {
         *flow = ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(300));
         if let Event::NewEvents(StartCause::Init) = event {
             tray = TrayIconBuilder::new()
                 .with_menu(Box::new(menu.clone()))
+                .with_menu_on_left_click(false)
                 .with_tooltip("LD Remote")
                 .with_icon(make_icon(false))
                 .build()
                 .ok();
+        }
+
+        // Left click on the tray icon opens the settings page; right click shows the menu.
+        while let Ok(ev) = tray_rx.try_recv() {
+            if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = ev {
+                util::open(&settings_url);
+            }
         }
 
         while let Ok(ev) = menu_rx.try_recv() {
@@ -119,7 +154,7 @@ fn run_tray(shared: Arc<Shared>, hub: Arc<hub::Hub>, rt: tokio::runtime::Runtime
                     autostart.set_checked(!want);
                 }
             } else if ev.id == open_logs.id() {
-                util::open(&util::local_dir().join("logs").to_string_lossy());
+                open_latest_log();
             } else if ev.id == quit.id() {
                 tracing::info!("quitting");
                 hub.shutdown();
@@ -220,11 +255,67 @@ fn set_autostart(on: bool) -> std::io::Result<()> {
     let (key, _) = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER).create_subkey(RUN_KEY)?;
     if on {
         let exe = std::env::current_exe()?;
-        key.set_value(RUN_VALUE, &format!("\"{}\"", exe.display()))
+        key.set_value(RUN_VALUE, &format!("\"{}\" {AUTOSTART_ARG}", exe.display()))
     } else {
         match key.delete_value(RUN_VALUE) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
             _ => Ok(()),
         }
     }
+}
+
+/// Opens today's (newest) log file in Notepad; the folder if there is none yet.
+fn open_latest_log() {
+    let dir = util::local_dir().join("logs");
+    let newest = std::fs::read_dir(&dir).ok().and_then(|entries| {
+        entries
+            .filter_map(Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().starts_with("agent"))
+            .max_by_key(|e| e.metadata().and_then(|m| m.modified()).ok())
+            .map(|e| e.path())
+    });
+    match newest {
+        Some(file) => {
+            if let Err(e) = std::process::Command::new("notepad.exe").arg(file).spawn() {
+                tracing::warn!("open log: {e}");
+            }
+        }
+        None => util::open(&dir.to_string_lossy()),
+    }
+}
+
+/// `ldremote --gpu-test <top hwnd> <render hwnd> <seconds> <out.h264>`: runs the GPU pipeline alone.
+fn gpu_test() {
+    let a: Vec<String> = std::env::args().collect();
+    let (top, render, secs, out) = (a[2].parse().unwrap(), a[3].parse().unwrap(), a[4].parse::<u64>().unwrap(), a[5].clone());
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let src = gpu::start(gpu::GpuOpts { top, render, bit_rate: 8_000_000, max_fps: 60, max_size: 0 }, tx);
+    let start = Instant::now();
+    let mut file = Vec::new();
+    let (mut frames, mut keys, mut bytes) = (0u64, 0u64, 0usize);
+    let mut first = None;
+    while start.elapsed() < Duration::from_secs(secs) {
+        match rx.try_recv() {
+            Ok(gpu::GpuEvent::Size { width, height }) => println!("size {width}x{height}"),
+            Ok(gpu::GpuEvent::Packet { key, data, .. }) => {
+                first.get_or_insert(start.elapsed());
+                frames += 1;
+                keys += key as u64;
+                bytes += data.len();
+                file.extend_from_slice(&data);
+                if frames == 90 {
+                    src.send(gpu::GpuCtl::Keyframe);
+                    src.send(gpu::GpuCtl::Bitrate(2_000_000));
+                }
+            }
+            Ok(gpu::GpuEvent::Closed(e)) => {
+                println!("closed: {e:?}");
+                break;
+            }
+            Err(_) => std::thread::sleep(Duration::from_millis(1)),
+        }
+    }
+    drop(src);
+    let _ = std::fs::write(&out, &file);
+    println!("frames={frames} keys={keys} bytes={bytes} first={first:?} avg_kbps={}", bytes as f64 * 8.0 / 1000.0 / secs as f64);
 }

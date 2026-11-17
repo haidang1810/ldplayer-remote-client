@@ -69,6 +69,19 @@ pub struct Instance {
     pub index: u32,
     pub title: String,
     pub running: bool,
+    /// Top-level LDPlayer window and its Android render child (0 when not running).
+    pub top_hwnd: i64,
+    pub render_hwnd: i64,
+}
+
+/// Instance index for an adb serial of an LDPlayer instance.
+pub fn index_for_serial(serial: &str) -> Option<u32> {
+    if let Some(p) = serial.strip_prefix("emulator-") {
+        let p: u32 = p.parse().ok()?;
+        return (p >= 5554 && p % 2 == 0).then(|| (p - 5554) / 2);
+    }
+    let p: u32 = serial.strip_prefix("127.0.0.1:")?.parse().ok()?;
+    (p >= 5555 && p % 2 == 1).then(|| (p - 5555) / 2)
 }
 
 /// LDPlayer instance N listens for adb as emulator-(5554+2N), or 127.0.0.1:(5555+2N) after `adb connect`.
@@ -133,9 +146,30 @@ impl LdEnv {
                 if f.len() < 5 {
                     return None;
                 }
-                Some(Instance { index: f[0].parse().ok()?, title: f[1].to_string(), running: f[4] == "1" })
+                Some(Instance {
+                    index: f[0].parse().ok()?,
+                    title: f[1].to_string(),
+                    running: f[4] == "1",
+                    top_hwnd: f[2].parse().unwrap_or(0),
+                    render_hwnd: f[3].parse().unwrap_or(0),
+                })
             })
             .collect())
+    }
+
+    /// Window handles (top, render) of the running LDPlayer instance behind an adb serial.
+    pub async fn windows_for_serial(&self, serial: &str) -> Option<(isize, isize)> {
+        let index = index_for_serial(serial)?;
+        let inst = self.instances().await.ok()?.into_iter().find(|i| i.index == index && i.running)?;
+        (inst.top_hwnd != 0 && inst.render_hwnd != 0).then_some((inst.top_hwnd as isize, inst.render_hwnd as isize))
+    }
+
+    /// Android display size (`wm size`, an override wins), e.g. (1600, 900).
+    pub async fn display_size(&self, serial: &str) -> Option<(u32, u32)> {
+        let out = run(&self.adb().await, &["-s", serial, "shell", "wm", "size"], Duration::from_secs(10)).await.ok()?;
+        let line = out.lines().filter(|l| l.contains("size:")).last()?;
+        let (w, h) = line.rsplit(':').next()?.trim().split_once('x')?;
+        Some((w.trim().parse().ok()?, h.trim().parse().ok()?))
     }
 
     pub async fn adb_devices(&self) -> Result<Vec<(String, String)>> {

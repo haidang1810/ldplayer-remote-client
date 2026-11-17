@@ -8,6 +8,7 @@ use anyhow::{anyhow, Context, Result};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use str0m::bwe::{Bitrate, BweKind};
 use str0m::change::{SdpAnswer, SdpPendingOffer};
 use str0m::channel::ChannelId;
 use str0m::media::{Direction, Frequency, MediaKind, MediaTime, Mid};
@@ -29,6 +30,8 @@ pub enum RtcEvent {
     /// Media can flow (ICE + DTLS up); carries a description of the selected path.
     Connected(String),
     KeyframeRequest,
+    /// Send-side bandwidth estimate (TWCC), bits per second.
+    Bandwidth(u64),
     Data(bool, Vec<u8>),
     Failed(String),
 }
@@ -68,10 +71,11 @@ pub fn stun_servers(ice_browser: &serde_json::Value) -> Vec<String> {
     out
 }
 
-pub fn start(stun: Vec<String>, events: impl Fn(RtcEvent) + Send + Sync + 'static) -> RtcPeer {
+/// `max_bps`: the most this viewer's video could use; BWE probes up to it.
+pub fn start(stun: Vec<String>, max_bps: u64, events: impl Fn(RtcEvent) + Send + Sync + 'static) -> RtcPeer {
     let (tx, rx) = mpsc::unbounded_channel();
     let task = tokio::spawn(async move {
-        if let Err(e) = run(stun, rx, &events).await {
+        if let Err(e) = run(stun, max_bps, rx, &events).await {
             events(RtcEvent::Failed(format!("{e:#}")));
         }
     });
@@ -117,13 +121,18 @@ async fn stun_binding(socket: &UdpSocket, server: &str) -> Result<SocketAddr> {
     Err(anyhow!("no STUN response from {server}"))
 }
 
-async fn run(stun: Vec<String>, mut rx: mpsc::UnboundedReceiver<RtcCmd>, events: &(impl Fn(RtcEvent) + Send + Sync)) -> Result<()> {
+async fn run(stun: Vec<String>, max_bps: u64, mut rx: mpsc::UnboundedReceiver<RtcCmd>, events: &(impl Fn(RtcEvent) + Send + Sync)) -> Result<()> {
     let socket = UdpSocket::bind("0.0.0.0:0").await.context("binding UDP")?;
     let port = socket.local_addr()?.port();
     let host_ip = primary_ip().ok_or_else(|| anyhow!("no network interface"))?;
     let local = SocketAddr::new(host_ip, port);
 
-    let mut rtc = RtcConfig::new().clear_codecs().enable_h264(true).enable_bwe(None).build(Instant::now());
+    let mut rtc = RtcConfig::new()
+        .clear_codecs()
+        .enable_h264(true)
+        .enable_bwe(Some(Bitrate::bps(max_bps.min(4_000_000))))
+        .build(Instant::now());
+    rtc.bwe().set_bitrate(Bitrate::kbps(300), Bitrate::bps(max_bps));
     rtc.add_local_candidate(Candidate::host(local, "udp")?);
     for server in &stun {
         match stun_binding(&socket, server).await {
@@ -170,11 +179,12 @@ async fn run(stun: Vec<String>, mut rx: mpsc::UnboundedReceiver<RtcCmd>, events:
                     }
                     Event::KeyframeRequest(_) => events(RtcEvent::KeyframeRequest),
                     Event::ChannelData(d) => events(RtcEvent::Data(d.binary, d.data)),
-                    Event::EgressBitrateEstimate(e) => {
+                    Event::EgressBitrateEstimate(BweKind::Twcc { estimate, .. }) => {
                         if last_estimate_log.elapsed() > Duration::from_secs(30) {
                             last_estimate_log = Instant::now();
-                            tracing::debug!("bandwidth estimate: {e:?}");
+                            tracing::debug!("bandwidth estimate: {estimate}");
                         }
+                        events(RtcEvent::Bandwidth(estimate.as_u64()));
                     }
                     Event::Closed => return Err(anyhow!("closed")),
                     _ => {}

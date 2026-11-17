@@ -18,6 +18,7 @@ use tokio_tungstenite::WebSocketStream;
 use crate::config::Shared;
 use crate::ldplayer::LdEnv;
 use crate::pacer::{self, ControlSlot, Touch};
+use crate::gpu::{self, GpuCtl, GpuEvent, GpuSource};
 use crate::rtc::{self, RtcCmd, RtcEvent, RtcPeer};
 use crate::scrcpy::{self, control, Event, Session, VideoOpts};
 use crate::util::{epoch_ms, mono_ms};
@@ -36,6 +37,11 @@ const QUEUE_BUDGET_MS: f64 = 250.0;
 const MAX_INFLIGHT_FRAMES: usize = 240;
 const RTT_SAMPLES: usize = 120;
 const DIAG_MAX_PER_MINUTE: u32 = 30;
+/// GPU key frames are cheap to ask for (no capture restart).
+const GPU_KEYFRAME_COOLDOWN: Duration = Duration::from_millis(300);
+/// Adaptive bit rate bounds for the GPU encoder.
+const GPU_MIN_BITRATE: u32 = 800_000;
+const GPU_START_BITRATE: u32 = 6_000_000;
 /// Give WebRTC this long to connect before the viewer stays on the WebSocket path.
 const RTC_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const DIAG_NUMBERS: [&str; 10] = ["ms", "keyframes", "fps", "mbps", "lost", "lossPct", "rtt", "buffer", "freezes", "freezeMs"];
@@ -70,6 +76,8 @@ struct Viewer {
     rtc_need_key: bool,
     rtc_active: bool,
     rtc_deadline: Option<Instant>,
+    /// Latest WebRTC send-side bandwidth estimate for this viewer (bps).
+    bwe: Option<u64>,
     inflight: VecDeque<(u32, f64)>,
     rtt_samples: VecDeque<f64>,
     base_rtt: Option<f64>,
@@ -148,11 +156,28 @@ struct Stream {
     idle_since: Option<Instant>,
     control: ControlSlot,
     itx: Option<mpsc::UnboundedSender<Internal>>,
+    /// GPU capture + encode (video), with scrcpy carrying control only.
+    gpu: Option<GpuSource>,
+    /// The GPU path failed for this device: use scrcpy video until the agent restarts.
+    gpu_failed: bool,
+    /// Android display size, oriented like the video (GPU mode: touches are rescaled to it).
+    display: Option<(u32, u32)>,
+    bitrate: u32,
+    ws_cap: u32,
+    ws_congested_at: Option<Instant>,
+    ws_clear_since: Instant,
+}
+
+struct Started {
+    session: Session,
+    name: String,
+    gpu: Option<(GpuSource, (u32, u32))>,
 }
 
 enum Internal {
-    Started(u64, anyhow::Result<(Session, String)>),
+    Started(u64, anyhow::Result<Started>),
     Event(u64, Event),
+    Gpu(u64, GpuEvent),
     /// (viewer id, that viewer's rtc generation, event)
     Rtc(u64, u64, RtcEvent),
 }
@@ -169,7 +194,10 @@ impl Stream {
         loop {
             let idle_deadline = self.idle_since.map(|t| tokio::time::Instant::from_std(t + IDLE_STOP));
             tokio::select! {
-                _ = tick.tick() => self.check_rtc_timeouts(),
+                _ = tick.tick() => {
+                    self.check_rtc_timeouts();
+                    self.adapt_bitrate();
+                }
                 cmd = cmds.recv() => match cmd {
                     Some(Cmd::Add(conn)) => self.add_viewer(conn, &itx),
                     Some(Cmd::Msg(id, m)) => self.handle_message(id, m),
@@ -205,6 +233,7 @@ impl Stream {
             rtc_need_key: true,
             rtc_active: false,
             rtc_deadline: None,
+            bwe: None,
             inflight: VecDeque::new(),
             rtt_samples: VecDeque::new(),
             base_rtt: None,
@@ -256,10 +285,41 @@ impl Stream {
         let generation = self.generation;
         let hub = self.hub.clone();
         let serial = self.serial.clone();
+        let try_gpu = hub.gpu_mode && !self.gpu_failed;
+        let start_bitrate = self.bitrate;
         tokio::spawn(async move {
             let (etx, mut erx) = mpsc::unbounded_channel::<Event>();
             let adb = hub.ld.adb().await;
-            let result = Session::start(&adb, &serial, &hub.jar, &hub.video, etx).await;
+            // GPU mode needs the LDPlayer window (to capture) and the display size (to map touches).
+            let gpu_target = if try_gpu {
+                match (hub.ld.windows_for_serial(&serial).await, hub.ld.display_size(&serial).await) {
+                    (Some(w), Some(d)) => Some((w, d)),
+                    _ => {
+                        tracing::info!("[{serial}] no LDPlayer window found, using scrcpy video");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            let video = if gpu_target.is_some() { None } else { Some(&hub.video) };
+            let result = Session::start(&adb, &serial, &hub.jar, video, etx).await.map(|(session, name)| {
+                let gpu = gpu_target.map(|((top, render), display)| {
+                    let (gtx, mut grx) = mpsc::unbounded_channel::<GpuEvent>();
+                    let opts = gpu::GpuOpts { top, render, bit_rate: start_bitrate, max_fps: hub.video.max_fps, max_size: 0 };
+                    let src = gpu::start(opts, gtx);
+                    let itx = itx.clone();
+                    tokio::spawn(async move {
+                        while let Some(ev) = grx.recv().await {
+                            if itx.send(Internal::Gpu(generation, ev)).is_err() {
+                                break;
+                            }
+                        }
+                    });
+                    (src, display)
+                });
+                Started { session, name, gpu }
+            });
             let ok = result.is_ok();
             let _ = itx.send(Internal::Started(generation, result));
             if ok {
@@ -273,6 +333,11 @@ impl Stream {
     }
 
     fn stop_session(&mut self) {
+        if let Some(src) = self.gpu.take() {
+            // Joins the capture thread; keep that off the async workers.
+            tokio::task::spawn_blocking(move || drop(src));
+        }
+        self.display = None;
         self.session = None;
         *self.control.lock().unwrap() = None;
         self.state = State::Idle;
@@ -282,10 +347,14 @@ impl Stream {
     fn on_internal(&mut self, ev: Internal) {
         match ev {
             Internal::Rtc(id, g, ev) => self.on_rtc(id, g, ev),
-            Internal::Started(g, _) | Internal::Event(g, _) if g != self.generation => {}
-            Internal::Started(_, Ok((session, name))) => {
+            Internal::Started(g, _) | Internal::Event(g, _) | Internal::Gpu(g, _) if g != self.generation => {}
+            Internal::Started(_, Ok(Started { session, name, gpu })) => {
                 *self.control.lock().unwrap() = Some(session.control_sender());
                 self.session = Some(session);
+                if let Some((src, display)) = gpu {
+                    self.gpu = Some(src);
+                    self.display = Some(display);
+                }
                 self.device_name = name;
                 self.state = State::Running;
                 self.last_keyframe_at = Instant::now();
@@ -311,6 +380,22 @@ impl Stream {
                 }
             }
             Internal::Event(_, Event::Packet { config, key, pts, data }) => self.on_packet(config, key, pts, data),
+            Internal::Gpu(_, GpuEvent::Size { width, height }) => {
+                // Same as a scrcpy session packet: viewers learn the (new) size.
+                self.on_internal(Internal::Event(self.generation, Event::Size { width, height }));
+            }
+            Internal::Gpu(_, GpuEvent::Packet { key, pts_us, data }) => self.on_packet(false, key, pts_us, data),
+            Internal::Gpu(_, GpuEvent::Closed(err)) => {
+                if let Some(e) = err {
+                    // Capture or encoder failed: carry on with the emulator's own encoder.
+                    self.log(format!("gpu video failed ({e}), switching to scrcpy video"));
+                    self.gpu_failed = true;
+                    self.stop_session();
+                    if let Some(itx) = self.itx.clone() {
+                        self.start(itx);
+                    }
+                }
+            }
             Internal::Event(_, Event::Clipboard(text)) => {
                 for v in self.viewers.values() {
                     v.send_json(json!({ "type": "clipboard", "text": text }));
@@ -333,6 +418,15 @@ impl Stream {
     }
 
     fn request_keyframe(&mut self, reason: &str) {
+        if let Some(src) = &self.gpu {
+            if self.last_keyframe_request.is_some_and(|t| t.elapsed() < GPU_KEYFRAME_COOLDOWN) {
+                return;
+            }
+            self.last_keyframe_request = Some(Instant::now());
+            tracing::debug!("[{}] gpu key frame ({reason})", self.serial);
+            src.send(GpuCtl::Keyframe);
+            return;
+        }
         if self.state != State::Running || self.last_keyframe_request.is_some_and(|t| t.elapsed() < KEYFRAME_REQUEST_COOLDOWN) {
             return;
         }
@@ -383,6 +477,7 @@ impl Stream {
             if v.is_congested(max_buffered) {
                 // Viewer cannot keep up: drop until the next (periodic) key frame instead of queueing.
                 v.need_key = true;
+                self.ws_congested_at = Some(Instant::now());
                 waiting = true;
                 continue;
             }
@@ -447,7 +542,8 @@ impl Stream {
         v.rtc_gen += 1;
         let generation = v.rtc_gen;
         let stun = rtc::stun_servers(&v.ice);
-        v.rtc = Some(rtc::start(stun, move |ev| {
+        let max_bps = if self.hub.gpu_mode { self.hub.gpu_max_bitrate } else { self.hub.video.bit_rate } as u64;
+        v.rtc = Some(rtc::start(stun, max_bps, move |ev| {
             let _ = itx.send(Internal::Rtc(id, generation, ev));
         }));
         v.rtc_deadline = Some(Instant::now() + RTC_CONNECT_TIMEOUT);
@@ -463,6 +559,7 @@ impl Stream {
                 self.log(format!("webrtc connected ({path})"));
                 self.request_keyframe("webrtc opened");
             }
+            RtcEvent::Bandwidth(bps) => v.bwe = Some(bps),
             RtcEvent::KeyframeRequest => {
                 v.rtc_need_key = true;
                 self.request_keyframe("webrtc PLI");
@@ -495,6 +592,58 @@ impl Stream {
         }
     }
 
+    /// GPU mode: the browser sends coordinates in video pixels, but scrcpy (control only) expects
+    /// them in display pixels together with the display size.
+    fn remap(&self, buf: &mut [u8]) {
+        let (Some((vw, vh)), Some((dw, dh)), Some(_)) = (self.size, self.display, self.gpu.as_ref()) else { return };
+        // Rotation: the window (video) turns, `wm size` doesn't.
+        let (dw, dh) = if (vw > vh) == (dw > dh) { (dw, dh) } else { (dh, dw) };
+        let (xo, yo, so) = match buf.first() {
+            Some(&control::INJECT_TOUCH_EVENT) if buf.len() == 32 => (10, 14, 18),
+            Some(&control::INJECT_SCROLL_EVENT) if buf.len() == 21 => (1, 5, 9),
+            _ => return,
+        };
+        let rd = |o: usize| i32::from_be_bytes([buf[o], buf[o + 1], buf[o + 2], buf[o + 3]]) as i64;
+        let x = (rd(xo) * dw as i64 / vw.max(1) as i64) as i32;
+        let y = (rd(yo) * dh as i64 / vh.max(1) as i64) as i32;
+        buf[xo..xo + 4].copy_from_slice(&x.to_be_bytes());
+        buf[yo..yo + 4].copy_from_slice(&y.to_be_bytes());
+        buf[so..so + 2].copy_from_slice(&(dw as u16).to_be_bytes());
+        buf[so + 2..so + 4].copy_from_slice(&(dh as u16).to_be_bytes());
+    }
+
+    /// GPU mode: follow the slowest viewer. WebRTC viewers report a bandwidth estimate (TWCC);
+    /// WebSocket viewers only tell us when they fall behind, so back off then and creep up after.
+    fn adapt_bitrate(&mut self) {
+        let Some(src) = &self.gpu else { return };
+        let max = self.hub.gpu_max_bitrate;
+        let has_ws = self.viewers.values().any(|v| !v.rtc_active);
+        if has_ws {
+            if self.ws_congested_at.is_some_and(|t| t.elapsed() < Duration::from_secs(2)) {
+                self.ws_cap = ((self.ws_cap as f64 * 0.7) as u32).max(GPU_MIN_BITRATE);
+                self.ws_clear_since = Instant::now();
+            } else if self.ws_clear_since.elapsed() > Duration::from_secs(3) {
+                self.ws_cap = ((self.ws_cap as f64 * 1.15) as u32).min(max);
+            }
+        }
+        let mut target = if has_ws { self.ws_cap } else { max };
+        for v in self.viewers.values().filter(|v| v.rtc_sending) {
+            if let Some(bwe) = v.bwe {
+                // Leave room for retransmissions and key frames.
+                target = target.min((bwe as f64 * 0.85) as u32);
+            }
+        }
+        let target = target.clamp(GPU_MIN_BITRATE, max);
+        let change = (target as f64 - self.bitrate as f64).abs() / self.bitrate.max(1) as f64;
+        if change > 0.08 {
+            if change > 0.25 {
+                self.log(format!("bit rate {:.1} → {:.1} Mbps", self.bitrate as f64 / 1e6, target as f64 / 1e6));
+            }
+            self.bitrate = target;
+            src.send(GpuCtl::Bitrate(target));
+        }
+    }
+
     fn handle_message(&mut self, id: u64, msg: Message) {
         match msg {
             Message::Binary(data) => {
@@ -504,14 +653,17 @@ impl Stream {
                 if data.first() == Some(&MSG_TIMED_TOUCH) {
                     if data.len() == TIMED_TOUCH_SIZE && data[9] == control::INJECT_TOUCH_EVENT {
                         let ts = f64::from_be_bytes(data[1..9].try_into().unwrap());
-                        let touch: Touch = data[9..41].try_into().unwrap();
+                        let mut touch: Touch = data[9..41].try_into().unwrap();
+                        self.remap(&mut touch);
                         if let Some(v) = self.viewers.get(&id) {
                             let _ = v.pacer.send((ts, touch));
                         }
                     }
                 } else if scrcpy::is_valid_control(&data) {
+                    let mut buf = data.to_vec();
+                    self.remap(&mut buf);
                     if let Some(ctl) = self.control.lock().unwrap().as_ref() {
-                        let _ = ctl.send(data.to_vec());
+                        let _ = ctl.send(buf);
                     }
                 }
             }
@@ -587,6 +739,8 @@ pub struct Hub {
     pub ld: Arc<LdEnv>,
     jar: PathBuf,
     video: VideoOpts,
+    gpu_mode: bool,
+    gpu_max_bitrate: u32,
     max_buffered: usize,
     streams: Mutex<HashMap<String, mpsc::UnboundedSender<Cmd>>>,
     next_id: AtomicUsize,
@@ -600,6 +754,8 @@ impl Hub {
             ld,
             jar,
             video: VideoOpts { max_size: cfg.max_size, bit_rate: cfg.bit_rate, max_fps: cfg.max_fps },
+            gpu_mode: cfg.video_source != "scrcpy",
+            gpu_max_bitrate: cfg.gpu_max_bit_rate.max(GPU_MIN_BITRATE),
             max_buffered: cfg.max_buffered_kb as usize * 1024,
             streams: Mutex::new(HashMap::new()),
             next_id: AtomicUsize::new(1),
@@ -628,6 +784,13 @@ impl Hub {
             idle_since: None,
             control: Arc::new(Mutex::new(None)),
             itx: None,
+            gpu: None,
+            gpu_failed: false,
+            display: None,
+            bitrate: GPU_START_BITRATE.min(self.gpu_max_bitrate),
+            ws_cap: GPU_START_BITRATE.min(self.gpu_max_bitrate),
+            ws_congested_at: None,
+            ws_clear_since: Instant::now(),
         };
         tokio::spawn(stream.run(rx));
         streams.insert(serial.to_string(), tx.clone());
